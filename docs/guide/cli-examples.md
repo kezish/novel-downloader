@@ -137,6 +137,8 @@ novel-cli download --site n23qb
 
 按关键字搜索小说
 
+完整的搜索语义（关键词规范化、查询意图、排序、过滤与缓存）见 [搜索指南](./search.md)。
+
 **Synopsis**
 
 ```bash
@@ -1091,6 +1093,7 @@ novel-cli doctor [-h] [--port N] [--json] [--online] [--fix] [--dry-run] [--fix-
 * 日志目录能否创建并写入
 * 输出目录所在卷的剩余空间 (低于 512 MiB 只警告)
 * 缓存目录大小与可由 `clean cache` 回收的空间 (仅提示)
+* 章节库存储: `raw_data` 是否存在/可写、章节库数量与总字节数、抽样 `PRAGMA quick_check` 与 schema 版本 (损坏/过新)、WAL 与卷剩余空间 (只读; 参见下文「章节库诊断」)
 * 搜索结果缓存的内存/磁盘条目、命中/过期/淘汰计数与聚合搜索配置指纹 (只读; 参见下文「搜索缓存诊断」)
 * 已注册下载站点数量
 * 抽样站点插件能否导入 (单个失败只警告, 全部失败才判定失败)
@@ -1137,6 +1140,51 @@ novel-cli doctor --fix --json
 `--fix --json` 在常规文档之外追加 `dry_run`、`max_age_days`、`fixed`、`skipped`、`errors` 与 `fix_summary`; 每条修复记录的 `path` 已做脱敏 (家目录显示为 `~`, 其他绝对路径只保留尾部)。
 
 > 所有必需检查通过时退出码为 `0`, 任意必需检查失败为 `1`。失败项下方会打印一条可执行的修复建议。可选检查 (`optional`) 只产生警告, 不影响退出码。
+
+**章节库诊断 (`storage`)**
+
+「章节库」(`storage`) 行只读检查配置的 `raw_data` 目录: 不创建目录、不写入任何文件、不生成 `-wal`/`-shm` 旁文件, 也不读取章节标题或正文。它是可选 (`optional`) 检查——发现问题只产生警告, 不影响 `doctor` 的退出码。
+
+人类可读输出形如 `12 database(s), 3.4 MiB`; 异常时追加 `; 1 problem(s), first: <path> (integrity_failed)`、`; not writable`、`; 12 with WAL but read-only` 或 `; only 400.0 MiB free`。完整字段在 `--json` 的 `checks[]` 中 (`key` 为 `storage`):
+
+| 字段 | 含义 |
+| --- | --- |
+| `path` | `raw_data` 目录; 输出时按 `doctor` 的脱敏规则缩短 |
+| `exists` | 目录是否存在; 尚未下载时缺失不算失败 |
+| `writable` | 目录是否可写 (只进行权限探测, 不创建临时文件) |
+| `databases` | 找到的 `chapter.<stage>.sqlite` 数量 |
+| `bytes` | 这些主库文件的总字节数 (不含 WAL) |
+| `sampled` | 实际抽查的数据库数; 库数不超过上限或全部为小库时全查, 否则最多 3 个 (均匀抽样) |
+| `checked` | 成功以只读方式打开并完成检查的数量 |
+| `corrupt` | 抽样中 `PRAGMA quick_check` 失败或 WAL 损坏的数量 (含 `not_database`) |
+| `schema_unsupported` | `PRAGMA user_version` 高于本版本支持值的数量 |
+| `skipped` | 因存在 WAL 或 hot journal 而未打开的数量 |
+| `wal_read_only` | 存在 WAL 且主库不可写的数量; 需要恢复写权限才能 checkpoint |
+| `free_bytes` | `raw_data` 所在卷的剩余字节; 无法获取时为 `null` |
+| `low_free_bytes` | 低空间阈值 (512 MiB) |
+| `problems` | `{path, category, reason}` 列表; category 为 `integrity_failed`、`schema_unsupported`、`wal_damaged`、`database_error` 或 `io_error` |
+| `not_opened` | `{path, reason, detail}` 列表; reason 为 `wal_pending` 或 `hot_journal` |
+
+**为什么有些库没有 `checked`**
+
+抽样使用 SQLite 的 `mode=ro&immutable=1` URI: 对记录为 WAL 模式的库, 普通 `mode=ro` 也会创建 `-shm` (并可能重建 `-wal`), 而诊断命令不允许修改被检查的数据。`immutable=1` 不会创建旁文件, 但看不到仅存在于 WAL 中、尚未 checkpoint 的已提交事务, 因此只要 `-wal` 存在, 该库就会被跳过并记入 `not_opened`。这不是损坏判定; 需要完整检查时运行 `novel-cli storage verify` (它会安全处理 WAL, 必要时复制到临时目录)。崩溃后留下 WAL 属正常现象, 下一次正常打开/写入会恢复。
+
+**怎么判断**
+
+* `exists=false`: 尚未下载过任何内容; 首次下载会创建该目录 (`doctor --fix` 不创建 `raw_data`)。
+* `writable=false`: 检查目录权限, 或修改 `general.raw_data_dir`。
+* `corrupt > 0`: 先运行 `novel-cli storage verify --json` 确认范围, 再用 `novel-cli storage restore` 从备份恢复; 不要直接删除主库。
+* `schema_unsupported > 0`: 这些库由更新版本写入; 升级应用, 不要用旧版本覆盖或删除。
+* `wal_read_only > 0`: 主库不可写而 WAL 存在, 无法 checkpoint; 恢复文件/目录写权限后重新检查。
+* `free_bytes` 低于 `low_free_bytes`: 清理空间或把 `raw_data` 移到其它卷; 低空间会导致下载截断。
+
+**用 `--json` 排查**
+
+```bash
+novel-cli doctor --json | jq '.checks[] | select(.key == "storage")'
+```
+
+输出只包含目录路径与计数, 不包含章节标题或正文; 路径与其它检查一样会脱敏。
 
 **搜索缓存诊断 (`search_cache`)**
 

@@ -173,6 +173,8 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
 
 ## 搜索
 
+关键词规范化、查询意图、排序与缓存的完整说明见 [搜索指南](./search.md)。
+
 请求体：
 
 ```json
@@ -1248,6 +1250,33 @@ JSON 响应**不**带 CSP。
 SSE 端点自己设置的 `Cache-Control: no-cache` 不会被覆盖。`/docs`、`/redoc`、
 `/openapi.json` 不在上述前缀内，不加这些头。
 
+### 条件请求（ETag / If-None-Match）
+
+`/api/v1/sites`、`/api/v1/history`、`/api/v1/music/platforms` 的成功响应带
+强 `ETag`：响应体 SHA-256 摘要的前 16 字节（32 位十六进制，加引号）。
+响应体就是表示本身，同一请求的序列化字节确定，因此强校验器成立。
+
+轮询时把上次拿到的值放进 `If-None-Match`：
+
+```bash
+curl -sD - -o /dev/null \
+  -H 'If-None-Match: "3f2a…"' \
+  http://127.0.0.1:8080/api/v1/history
+```
+
+- 内容未变：`304 Not Modified`，**无响应体**，仍带 `ETag`、`Cache-Control`、
+  `X-Request-ID` 与安全响应头。
+- 内容变化或不匹配：`200`，带新 `ETag`。
+- 支持逗号分隔的多个校验器（任一匹配即 304）与 `*`（匹配当前表示）。
+- 比较使用 RFC 9110 的弱比较：`W/"<tag>"` 也能匹配强 `ETag`。
+- 查询参数属于表示的一部分（例如 `/history?limit=5`），不同参数的响应体
+  不同，`ETag` 自然不同，不会误判为 304。
+- 超过 512 KiB 的响应不生成 `ETag`（避免缓冲与哈希大响应的开销），照常
+  返回 `200`。
+
+`/tasks*`、`/login*`、`/music/jobs*`、`/watchlist*` 等实时或含凭据的端点
+**不启用**条件请求，也不发送 `ETag`。
+
 ### CORS
 
 默认**关闭**：不发送任何 `Access-Control-*` 头，且携带非回环 `Origin` 的
@@ -1272,9 +1301,12 @@ curl 不发 `Origin`，不受影响。
     内嵌引擎**没有 CORS 层**：它只绑定 `127.0.0.1`、只服务原生客户端，因此
     不发送任何 `Access-Control-*` 头，浏览器也无法跨源读取它的响应。它同样
     带 `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、
-    `X-Request-ID`，以及 `/downloads` 的 sandbox CSP；但**不实现** REST 的
-    `Cache-Control` 策略（原生客户端不经过 HTTP 缓存）。若将来让浏览器访问
-    内嵌端口，需要先补上这两块。
+    `X-Request-ID`，以及 `/downloads` 的 sandbox CSP。三个参考端点
+    （`/sites`、`/history`、`/music/platforms`）与 REST 一样带强 `ETag` 与
+    `Cache-Control: private, max-age=60`，匹配的 `If-None-Match` 同样返回
+    `304`；其余 REST 缓存策略（实时数据的 `no-store`、`/downloads` 的
+    `public`）仍未实现（原生客户端不经过 HTTP 缓存）。若将来让浏览器访问
+    内嵌端口，需要先补上 CORS 与这部分策略。
 
 ## 错误码
 

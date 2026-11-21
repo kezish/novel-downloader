@@ -6,7 +6,7 @@
 
 ## 0. 先收集基本信息
 
-先运行内置诊断命令，它会检查 Python 版本、包安装、`settings.toml`、输出目录、站点/搜索器、音乐依赖与 API 端口占用：
+先运行内置诊断命令，它会检查 Python 版本、包安装、`settings.toml`、输出目录、章节库、站点/搜索器、音乐依赖与 API 端口占用：
 
 ```bash
 novel-cli doctor
@@ -43,6 +43,21 @@ novel-cli doctor --json | jq '.checks[] | select(.key == "search_cache")'
 ```
 
 然后再按上面的规律判断；这一条命令里的 `hits`/`misses` 仍只是该新进程的计数。
+
+### 章节库：`raw_data` 缺失、不可写或库损坏
+
+`doctor` 的「章节库」(`storage`) 行只读检查配置的 `raw_data` 目录, 不会创建目录或 `-wal`/`-shm` 旁文件, 也不会读取章节标题/正文。字段与判断方法见 [CLI 用法 § doctor](./cli-examples.md#doctor-subcommand) 的「章节库诊断」。
+
+* `exists=false`: 尚未下载过内容; 首次下载会自动创建。`doctor --fix` 只处理输出/缓存/日志目录, 不创建 `raw_data`。
+* `writable=false`: 检查 `raw_data` 的权限, 或修改配置中的 `general.raw_data_dir`。
+* `corrupt > 0`: 先用 `novel-cli storage verify --json` 确认范围, 再用 `novel-cli storage restore` 从备份恢复; 不要先删除主库。
+* `schema_unsupported > 0`: 库由更新版本写入, 应升级应用, 不要用旧版本覆盖。
+* `skipped > 0` (`not_opened`): 库旁存在 WAL 或 hot journal。这是崩溃后的正常状态, 下一次正常打开/写入会恢复; 诊断命令跳过了它以免创建旁文件。需要完整校验时运行 `novel-cli storage verify`。
+* `free_bytes` 低于 `low_free_bytes` (512 MiB): 清理空间或把 `raw_data` 移到其它卷, 否则下载可能被截断。
+
+```bash
+novel-cli doctor --json | jq '.checks[] | select(.key == "storage")'
+```
 
 然后收集版本与日志：
 

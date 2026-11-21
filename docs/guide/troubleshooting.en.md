@@ -6,7 +6,7 @@ This page covers common problems and their diagnosis steps. Commands are run fro
 
 ## 0. Collect Basic Information First
 
-Start with the built-in diagnostic command. It checks the Python version, package installation, `settings.toml`, output directory, sites/searchers, music dependencies, and whether the API port is available:
+Start with the built-in diagnostic command. It checks the Python version, package installation, `settings.toml`, output directory, chapter storage, sites/searchers, music dependencies, and whether the API port is available:
 
 ```bash
 novel-cli doctor
@@ -43,6 +43,21 @@ novel-cli doctor --json | jq '.checks[] | select(.key == "search_cache")'
 ```
 
 Then judge by the patterns above; in this command `hits`/`misses` are still only that new process's counters.
+
+### Chapter Storage: `raw_data` Is Missing, Read-Only, or a Database Is Damaged
+
+The `Chapter storage` (`storage`) row in `doctor` inspects the configured `raw_data` directory read-only: it creates no directory or `-wal`/`-shm` sidecar and never reads chapter titles or bodies. See "Chapter-storage diagnostics" in [CLI Usage § doctor](./cli-examples.en.md#doctor-subcommand) for the fields and how to read them.
+
+* `exists=false`: nothing has been downloaded yet; the first download creates it. `doctor --fix` only handles the output/cache/log directories and never creates `raw_data`.
+* `writable=false`: check the permissions of `raw_data`, or change `general.raw_data_dir` in the configuration.
+* `corrupt > 0`: run `novel-cli storage verify --json` to confirm the scope, then restore from a backup with `novel-cli storage restore`; do not delete the main file first.
+* `schema_unsupported > 0`: those databases were written by a newer build; upgrade the application instead of overwriting them with an older build.
+* `skipped > 0` (`not_opened`): a WAL or hot journal sits next to the database. That is normal after a crash and is recovered on the next normal open/write; the diagnostic command skips it so it does not create a sidecar. Run `novel-cli storage verify` for a full check.
+* `free_bytes` below `low_free_bytes` (512 MiB): free space or move `raw_data` to another volume; a full volume truncates downloads.
+
+```bash
+novel-cli doctor --json | jq '.checks[] | select(.key == "storage")'
+```
 
 Then collect the version and logs:
 

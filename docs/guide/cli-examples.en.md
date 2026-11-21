@@ -137,6 +137,8 @@ novel-cli download --site n23qb
 
 Search for novels by keyword
 
+For the full search semantics (keyword normalization, query intent, ranking, filtering and caching), see the [search guide](./search.md).
+
 **Synopsis**
 
 ```bash
@@ -1116,6 +1118,7 @@ novel-cli doctor [-h] [--port N] [--json] [--online] [--fix] [--dry-run] [--fix-
 * The log directory can be created and written
 * Free space on the output directory's volume (warns below 512 MiB)
 * Cache directory size and how much `clean cache` could reclaim (informational)
+* Chapter storage: whether `raw_data` exists and is writable, database count and total bytes, sampled `PRAGMA quick_check` and schema versions (corrupt/too new), WAL state and volume free space (read-only; see "Chapter-storage diagnostics" below)
 * Search-cache memory/disk occupancy, hit/expired/eviction counters, and the aggregate-search configuration fingerprint (read-only; see "Search-cache diagnostics" below)
 * Number of registered download sites
 * A sample of site plugins imports (one failure is a warning; only all failures are fatal)
@@ -1162,6 +1165,51 @@ novel-cli doctor --fix --json
 `--fix --json` adds `dry_run`, `max_age_days`, `fixed`, `skipped`, `errors`, and `fix_summary` to the usual document; each fix record's `path` is masked (the home directory becomes `~`, other absolute paths keep only their tail).
 
 > Exit code is `0` when every required check passes and `1` otherwise. Each failing row prints an actionable fix. Optional checks (`optional`) only produce warnings and do not affect the exit code.
+
+**Chapter-storage diagnostics (`storage`)**
+
+The `Chapter storage` row inspects the configured `raw_data` directory read-only: it creates no directory, writes no file, produces no `-wal`/`-shm` sidecar, and never reads a chapter title or body. It is an optional (`optional`) check — findings are warnings and do not affect `doctor`'s exit code.
+
+The human-readable output looks like `12 database(s), 3.4 MiB`; problems append `; 1 problem(s), first: <path> (integrity_failed)`, `; not writable`, `; 12 with WAL but read-only`, or `; only 400.0 MiB free`. The full field set is in `--json` under `checks[]` (with `key` set to `storage`):
+
+| Field | Meaning |
+| --- | --- |
+| `path` | The `raw_data` directory; shortened by `doctor`'s masking rules in output |
+| `exists` | Whether the directory exists; missing before the first download is not a failure |
+| `writable` | Whether the directory accepts writes (permission probe only, no temporary file) |
+| `databases` | Number of `chapter.<stage>.sqlite` files found |
+| `bytes` | Total bytes of those main database files (WAL excluded) |
+| `sampled` | Databases actually inspected; all when the library fits the limit or every file is small, otherwise at most 3 (evenly spread) |
+| `checked` | Databases opened read-only and checked successfully |
+| `corrupt` | Sampled databases whose `PRAGMA quick_check` failed or whose WAL is damaged (includes `not_database`) |
+| `schema_unsupported` | Databases whose `PRAGMA user_version` is newer than this build supports |
+| `skipped` | Databases not opened because a WAL or hot journal is present |
+| `wal_read_only` | Databases with a WAL whose main file is not writable; write permission is needed to checkpoint |
+| `free_bytes` | Free bytes on the `raw_data` volume; `null` when unavailable |
+| `low_free_bytes` | Low-space threshold (512 MiB) |
+| `problems` | `{path, category, reason}` entries; category is `integrity_failed`, `schema_unsupported`, `wal_damaged`, `database_error`, or `io_error` |
+| `not_opened` | `{path, reason, detail}` entries; reason is `wal_pending` or `hot_journal` |
+
+**Why some databases are not `checked`**
+
+Sampling uses SQLite's `mode=ro&immutable=1` URI: for a database whose header records WAL mode, plain `mode=ro` still creates `-shm` (and may recreate `-wal`), and a diagnostic command must not modify the data it inspects. `immutable=1` creates no sidecars but cannot see committed transactions that live only in a WAL, so any database with a `-wal` sidecar is skipped and listed under `not_opened`. That is not a corruption verdict; run `novel-cli storage verify` for a full check (it handles WAL safely, copying to a temporary directory when necessary). A WAL left by a crash is normal and is recovered on the next normal open/write.
+
+**How to read it**
+
+* `exists=false`: nothing has been downloaded yet; the first download creates the directory (`doctor --fix` does not create `raw_data`).
+* `writable=false`: check directory permissions or change `general.raw_data_dir`.
+* `corrupt > 0`: run `novel-cli storage verify --json` to confirm the scope, then restore from a backup with `novel-cli storage restore`; do not delete the main file first.
+* `schema_unsupported > 0`: those databases were written by a newer build; upgrade the application instead of overwriting or deleting them with an older build.
+* `wal_read_only > 0`: the main file is read-only while a WAL exists, so it cannot be checkpointed; restore file/directory write permission and re-run.
+* `free_bytes` below `low_free_bytes`: free space or move `raw_data` to another volume; a full volume truncates downloads.
+
+**Diagnose with `--json`**
+
+```bash
+novel-cli doctor --json | jq '.checks[] | select(.key == "storage")'
+```
+
+The output contains directory paths and counts only — no chapter titles or bodies — and paths are masked like every other check.
 
 **Search-cache diagnostics (`search_cache`)**
 

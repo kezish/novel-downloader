@@ -184,6 +184,8 @@ historical fields for old clients and monitoring:
 
 ## Search
 
+For a full explanation of keyword normalization, query intent, ranking and caching, see the [search guide](./search.md).
+
 Request body:
 
 ```json
@@ -1425,6 +1427,39 @@ A `Cache-Control` set by an SSE route (`no-cache`) is never overridden.
 `/docs`, `/redoc` and `/openapi.json` are outside those prefixes and receive
 none of these headers.
 
+### Conditional requests (ETag / If-None-Match)
+
+A successful `/api/v1/sites`, `/api/v1/history` or `/api/v1/music/platforms`
+response carries a strong `ETag`: the first 16 bytes of the SHA-256 of the
+response body (32 hex characters, quoted). The body *is* the representation,
+and the serialisation is deterministic for a given request, so a strong
+validator is correct.
+
+Send the previous value back while polling:
+
+```bash
+curl -sD - -o /dev/null \
+  -H 'If-None-Match: "3f2a…"' \
+  http://127.0.0.1:8080/api/v1/history
+```
+
+- Unchanged: `304 Not Modified`, **no body**, still carrying `ETag`,
+  `Cache-Control`, `X-Request-ID` and the security headers.
+- Changed or no match: `200` with a new `ETag`.
+- A comma-separated list matches when any member does; `*` matches any
+  current representation.
+- Comparison is the RFC 9110 weak comparison, so `W/"<tag>"` matches the
+  strong tag too.
+- Query parameters are part of the representation (`/history?limit=5`), so a
+  different query yields a different body and a different `ETag`; an old
+  validator cannot produce a false 304.
+- Bodies above 512 KiB get no `ETag` (buffering and hashing a very large
+  response costs more than the bandwidth saved); they are still served with
+  `200`.
+
+Live or credential-bearing endpoints (`/tasks*`, `/login*`, `/music/jobs*`,
+`/watchlist*`) do **not** take part and never send an `ETag`.
+
 ### CORS
 
 Off by default: no `Access-Control-*` header is sent, and a browser request
@@ -1453,9 +1488,13 @@ removed.
     serves native clients, so it sends no `Access-Control-*` header and a
     browser cannot read its responses cross-origin. It does carry
     `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
-    `X-Request-ID`, and the `/downloads` sandbox CSP; it does **not** implement
-    the REST `Cache-Control` policy (native clients do not go through an HTTP
-    cache). Pointing a browser at the embedded port would require adding both.
+    `X-Request-ID`, and the `/downloads` sandbox CSP. Like REST, the three
+    reference endpoints (`/sites`, `/history`, `/music/platforms`) carry a
+    strong `ETag`, `Cache-Control: private, max-age=60`, and answer a
+    matching `If-None-Match` with `304`. The rest of the REST cache policy
+    (live-data `no-store`, `/downloads` `public`) is still not implemented
+    (native clients do not sit behind an HTTP cache). Pointing a browser at
+    the embedded port would require adding CORS and that policy.
 
 ## Error codes
 
