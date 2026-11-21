@@ -320,7 +320,18 @@ Rules:
 | the tag is an ancestor of HEAD | allowed, prints a notice, **the tag is not moved** |
 | the tag diverged from HEAD (not an ancestor) | refused; `--allow-tag-behind` cannot help, handle the tag by hand |
 | the tag points at another commit | refused; never silently reused |
-| the remote tag exists at a different commit | refused |
+| the remote tag exists at a different commit | refused; if both commits have an **identical tree** (a content-equal replay with a different SHA), `--skip-build --allow-tag-content-equal` is accepted |
+| `--allow-tag-content-equal` without `--skip-build` | the combination is rejected |
+
+`--allow-tag-content-equal` reads the remote tag commit's tree through the API and
+compares it with the local `HEAD^{tree}`; it only proceeds when they are equal. It
+exists for API-replayed pushes (`build/push_replay.py` / `scripts/push_via_api.py`),
+which create a new commit with the same content:
+
+```bash
+.venv/Scripts/python.exe -u scripts/release.py \
+  --skip-build --allow-tag-content-equal > build/rel.log 2>&1
+```
 
 `release.py` **never moves or deletes a tag**. Changing a tag is a destructive operation and
 needs explicit approval first.

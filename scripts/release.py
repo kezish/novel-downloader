@@ -68,6 +68,10 @@ already uploaded in that run are skipped by SHA-256 on the next attempt.
 lets such a resume proceed when ``HEAD`` has moved ahead of the version tag,
 provided the tag is an ancestor of ``HEAD``.  A real build always requires
 the tag to point at ``HEAD``; no run ever moves or deletes a tag.
+``--allow-tag-content-equal`` is the sibling escape hatch for a different
+commit SHA with an **identical tree** (what an API-replayed push produces).
+It compares the remote commit's tree with ``HEAD^{tree}`` through the API and
+refuses when they differ; it too is only accepted with ``--skip-build``.
 
 Exit codes: 0 success; 2 for a ``ReleaseError`` (bad input, failed build,
 API error) and for argparse usage errors.
@@ -1540,6 +1544,18 @@ class GitHubClient:
             return str(target["sha"])
         return None
 
+    def get_commit_tree(self, sha: str) -> str | None:
+        """The tree object of a remote commit, or ``None`` when unavailable."""
+        url = f"{self._api}/repos/{self._slug}/git/commits/{quote(sha)}"
+        reply = self._request("GET", url, expected=(200, 404), retries=3)
+        if reply.status == 404:
+            return None
+        payload = self._json(reply, f"commit {sha[:12]}")
+        tree = payload.get("tree")
+        if isinstance(tree, dict) and isinstance(tree.get("sha"), str):
+            return str(tree["sha"])
+        return None
+
     def ensure_tag_ref(self, tag: str, sha: str) -> None:
         """
         Point ``refs/tags/<tag>`` at *sha*, tolerating an identical existing ref.
@@ -1853,6 +1869,11 @@ def head_commit(repo_root: Path) -> str | None:
     return _git_stdout(repo_root, ["rev-parse", "HEAD"])
 
 
+def head_tree_sha(repo_root: Path) -> str | None:
+    """The tree object of ``HEAD``, or ``None`` outside a git checkout."""
+    return _git_stdout(repo_root, ["rev-parse", "HEAD^{tree}"])
+
+
 def tag_exists_local(repo_root: Path, tag: str) -> bool:
     """Whether *tag* already exists in the local repository."""
     return local_tag_commit(repo_root, tag) is not None
@@ -1943,6 +1964,9 @@ def verify_tag_target(
     remote_sha: str | None,
     repo_root: Path,
     allow_tag_behind: bool = False,
+    remote_tree: str | None = None,
+    head_tree: str | None = None,
+    allow_content_equal: bool = False,
 ) -> None:
     """
     Refuse to publish under a tag that does not belong to this release.
@@ -1986,10 +2010,25 @@ def verify_tag_target(
             )
     expected = local_sha or head_sha
     if remote_sha is not None and expected is not None and remote_sha != expected:
+        if (
+            allow_content_equal
+            and remote_tree is not None
+            and head_tree is not None
+            and remote_tree == head_tree
+        ):
+            print(
+                f"==> Remote tag {tag} points at {remote_sha[:12]} instead of "
+                f"{expected[:12]}, but both commits have tree "
+                f"{remote_tree[:12]}; continuing with --allow-tag-content-equal "
+                "(the tag is not moved)"
+            )
+            return
         raise ReleaseError(
             f"tag {tag} already exists on origin at {remote_sha[:12]}, but "
             f"this release needs {expected[:12]}; delete or move the remote tag "
-            "before releasing"
+            "before releasing.  If that commit is a content-identical replay "
+            "(same tree, different SHA), re-run with --skip-build "
+            "--allow-tag-content-equal"
         )
 
 
@@ -2205,6 +2244,12 @@ def _dry_run(
             "Tag behind  : refused by default (pass --allow-tag-behind with "
             "--skip-build to resume; ancestry checked at release time)"
         )
+    if args.allow_tag_content_equal:
+        print(
+            "Tag replay  : content-equal remote tag allowed "
+            "(--allow-tag-content-equal with --skip-build; trees compared, "
+            "tag never moved)"
+        )
     print(f"Repository  : {args.repo or '(from git remote origin)'}")
     print(f"Targets     : {', '.join(targets)}")
     print(f"Auth        : {TOKEN_ENV_VARS[0]}/GH_TOKEN env, else git credential fill")
@@ -2349,6 +2394,11 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
         raise ReleaseError(
             "--allow-tag-behind requires --skip-build: a real build must be "
             "released from HEAD, so only a resumed build may sit behind the tag"
+        )
+    if args.allow_tag_content_equal and not args.skip_build:
+        raise ReleaseError(
+            "--allow-tag-content-equal requires --skip-build: only a resumed "
+            "build may be published under a content-equal remote tag"
         )
     # Notes first: a missing or empty CHANGELOG section is the most actionable
     # error, and it also covers the "released a version that was never
@@ -2565,6 +2615,20 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
     local_sha = local_tag_commit(repo_root, tag)
     head_sha = head_commit(repo_root)
     remote_sha = remote_tag_commit(repo_root, tag)
+    client = GitHubClient(slug, token, api_base=args.api_base)
+    content_equal_ok = bool(args.allow_tag_content_equal and args.skip_build)
+    remote_tree = None
+    head_tree = None
+    if (
+        content_equal_ok
+        and remote_sha is not None
+        and remote_sha != (local_sha or head_sha)
+    ):
+        # An API-replayed push creates a new commit with the same tree.  Fetch
+        # both trees so the caller can prove content equality instead of
+        # trusting the flag alone.
+        remote_tree = client.get_commit_tree(remote_sha)
+        head_tree = head_tree_sha(repo_root)
     verify_tag_target(
         tag,
         local_sha=local_sha,
@@ -2572,6 +2636,9 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
         remote_sha=remote_sha,
         repo_root=repo_root,
         allow_tag_behind=args.allow_tag_behind and args.skip_build,
+        remote_tree=remote_tree,
+        head_tree=head_tree,
+        allow_content_equal=content_equal_ok,
     )
     if local_sha is not None:
         print(f"==> Tag {tag} exists locally at {local_sha[:12]}, skipping creation")
@@ -2592,7 +2659,6 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
         push_tag(repo_root, tag, token, slug, api_base=args.api_base)
 
     # 6. Release + assets ----------------------------------------------------
-    client = GitHubClient(slug, token, api_base=args.api_base)
     release = client.get_release_by_tag(tag)
     publish_after_verify = False
     if release is None:
@@ -2684,6 +2750,15 @@ def main(argv: list[str] | None = None) -> int:
             "with --skip-build only: allow resuming when the version tag is an "
             "ancestor of HEAD (HEAD advanced after tagging); the tag is never "
             "moved or deleted and a real build still requires tag == HEAD"
+        ),
+    )
+    parser.add_argument(
+        "--allow-tag-content-equal",
+        action="store_true",
+        help=(
+            "with --skip-build only: allow a remote tag that points at a "
+            "different commit with an identical tree (an API-replayed push); "
+            "refuses when the trees differ, and never moves the tag"
         ),
     )
     parser.add_argument(

@@ -2650,6 +2650,96 @@ class TestTagTarget:
         assert sub.calls == []
         assert http.requests == []
 
+    def test_allow_tag_content_equal_requires_skip_build(
+        self,
+        release: Any,
+        harness: tuple[Path, FakeSubprocess, FakeHTTP],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root, sub, http = harness
+
+        rc = release.main(
+            [
+                "--allow-tag-content-equal",
+                "--skip-android",
+                "--skip-installer",
+                "--repo",
+                SLUG,
+            ]
+        )
+
+        assert rc == 2
+        assert "requires --skip-build" in capsys.readouterr().err
+        assert sub.calls == []
+        assert http.requests == []
+
+    def test_content_equal_remote_tag_is_accepted_with_the_flag(
+        self,
+        release: Any,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        release.verify_tag_target(
+            "v1.2.3",
+            local_sha="a" * 40,
+            head_sha="a" * 40,
+            remote_sha="c" * 40,
+            repo_root=tmp_path,
+            remote_tree="d" * 40,
+            head_tree="d" * 40,
+            allow_content_equal=True,
+        )
+
+        assert "allow-tag-content-equal" in capsys.readouterr().out
+
+    def test_content_equal_requires_matching_trees(
+        self,
+        release: Any,
+        tmp_path: Path,
+    ) -> None:
+        with pytest.raises(release.ReleaseError, match="already exists on origin"):
+            release.verify_tag_target(
+                "v1.2.3",
+                local_sha="a" * 40,
+                head_sha="a" * 40,
+                remote_sha="c" * 40,
+                repo_root=tmp_path,
+                remote_tree="d" * 40,
+                head_tree="e" * 40,
+                allow_content_equal=True,
+            )
+
+    def test_content_equal_needs_both_trees(
+        self,
+        release: Any,
+        tmp_path: Path,
+    ) -> None:
+        with pytest.raises(release.ReleaseError, match="already exists on origin"):
+            release.verify_tag_target(
+                "v1.2.3",
+                local_sha="a" * 40,
+                head_sha="a" * 40,
+                remote_sha="c" * 40,
+                repo_root=tmp_path,
+                allow_content_equal=True,
+            )
+
+    def test_content_equal_is_refused_without_the_flag(
+        self,
+        release: Any,
+        tmp_path: Path,
+    ) -> None:
+        with pytest.raises(release.ReleaseError, match="already exists on origin"):
+            release.verify_tag_target(
+                "v1.2.3",
+                local_sha="a" * 40,
+                head_sha="a" * 40,
+                remote_sha="c" * 40,
+                repo_root=tmp_path,
+                remote_tree="d" * 40,
+                head_tree="d" * 40,
+            )
+
     def test_remote_tag_at_another_commit_aborts(
         self,
         release: Any,

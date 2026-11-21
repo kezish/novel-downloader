@@ -294,7 +294,17 @@ release 全程以**草稿**创建，只有这一步通过才 `PATCH` 成公开�
 | tag 是 HEAD 的祖先 | 允许，打印提示，**tag 不移动** |
 | tag 与 HEAD 分叉（不是祖先） | 拒绝，`--allow-tag-behind` 也救不了；需手工处理 tag |
 | tag 指向别的提交 | 拒绝，绝不静默复用 |
-| 远端已有 tag 但指向不同提交 | 拒绝 |
+| 远端已有 tag 但指向不同提交 | 拒绝；若两个提交的 **tree 完全相同**（内容一致、SHA 不同的重放提交），可用 `--skip-build --allow-tag-content-equal` |
+| `--allow-tag-content-equal` 不带 `--skip-build` | 参数组合直接拒绝 |
+
+`--allow-tag-content-equal` 会通过 API 读取远端 tag 提交的 tree，与本地
+`HEAD^{tree}` 比较；只相等才放行，否则仍拒绝。它针对的是 API 重放推送
+（`build/push_replay.py` / `scripts/push_via_api.py`）产生的内容一致、SHA 不同的提交：
+
+```bash
+.venv/Scripts/python.exe -u scripts/release.py \
+  --skip-build --allow-tag-content-equal > build/rel.log 2>&1
+```
 
 `release.py` **从不移动或删除 tag**。需要改 tag 属于破坏性操作，必须先征得同意。
 
