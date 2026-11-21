@@ -601,6 +601,310 @@ def test_window_state_file_lives_in_the_music_data_dir(
 
 
 # ---------------------------------------------------------------------------
+# Window state: desktop-prefs round trip and safe restore
+# ---------------------------------------------------------------------------
+def test_window_state_round_trips_through_the_prefs_keys() -> None:
+    state = wstate.WindowState(
+        wstate.WindowGeometry(1100, 720, -1200, 40), maximized=True
+    )
+
+    mapping = wstate.window_state_to_prefs(state)
+
+    assert mapping == {
+        "window_width": 1100,
+        "window_height": 720,
+        "window_x": -1200,
+        "window_y": 40,
+        "window_maximized": True,
+    }
+    restored = wstate.restore_window_state(
+        mapping, (-1920, 0, 3840, 1080), (0, 0, 1920, 1080)
+    )
+    assert restored == state
+
+
+def test_restore_window_state_returns_none_without_window_keys() -> None:
+    assert wstate.restore_window_state({}) is None
+    assert wstate.restore_window_state({"theme": "dark"}) is None
+
+
+def test_restore_window_state_honours_a_lone_maximized_flag() -> None:
+    """The flag is independent: corrupt/missing geometry must not drop it."""
+    state = wstate.restore_window_state({"window_maximized": True})
+
+    assert state == wstate.WindowState(
+        wstate.WindowGeometry(
+            wstate.DEFAULT_WINDOW_WIDTH, wstate.DEFAULT_WINDOW_HEIGHT
+        ),
+        maximized=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("mapping", "expected_size"),
+    [
+        # Each axis falls back independently.
+        (
+            {"window_width": "1100", "window_height": 720},
+            (wstate.DEFAULT_WINDOW_WIDTH, 720),
+        ),
+        (
+            {"window_width": 1100.0, "window_height": 720},
+            (wstate.DEFAULT_WINDOW_WIDTH, 720),
+        ),
+        # ``bool`` is not an integer for geometry purposes.
+        (
+            {"window_width": True, "window_height": 720},
+            (wstate.DEFAULT_WINDOW_WIDTH, 720),
+        ),
+        (
+            {"window_width": 0, "window_height": 720},
+            (wstate.DEFAULT_WINDOW_WIDTH, 720),
+        ),
+        (
+            {"window_width": -5, "window_height": 720},
+            (wstate.DEFAULT_WINDOW_WIDTH, 720),
+        ),
+        (
+            {"window_width": 10**9, "window_height": 720},
+            (wstate.DEFAULT_WINDOW_WIDTH, 720),
+        ),
+        # Below the window's min_size: use the default instead of a window
+        # the user could not interact with.
+        (
+            {"window_width": 500, "window_height": 400},
+            (wstate.DEFAULT_WINDOW_WIDTH, wstate.DEFAULT_WINDOW_HEIGHT),
+        ),
+        # A usable size is kept.
+        (
+            {"window_width": 1100, "window_height": 720},
+            (1100, 720),
+        ),
+    ],
+)
+def test_restore_window_state_falls_back_for_invalid_sizes(
+    mapping: dict[str, Any], expected_size: tuple[int, int]
+) -> None:
+    state = wstate.restore_window_state(mapping)
+    assert state is not None
+    assert (state.geometry.width, state.geometry.height) == expected_size
+    assert not state.maximized
+
+
+@pytest.mark.parametrize(
+    "position",
+    [
+        {"window_x": "50", "window_y": 30},
+        {"window_x": 50.0, "window_y": 30},
+        {"window_x": True, "window_y": 30},
+        {"window_x": 10**9, "window_y": 30},
+        # A half-pair is not a position.
+        {"window_x": 50},
+        {"window_x": 50, "window_y": None},
+    ],
+)
+def test_restore_window_state_drops_invalid_origins(
+    position: dict[str, Any],
+) -> None:
+    state = wstate.restore_window_state(
+        {"window_width": 1100, "window_height": 720, **position}
+    )
+    assert state is not None
+    assert (state.geometry.x, state.geometry.y) == (None, None)
+
+
+def test_restore_window_state_centres_a_fully_offscreen_window() -> None:
+    """The monitor the window was saved on is no longer connected."""
+    state = wstate.restore_window_state(
+        {
+            "window_width": 1000,
+            "window_height": 700,
+            "window_x": 5000,
+            "window_y": 4000,
+        },
+        virtual_bounds=(0, 0, 1920, 1080),
+        primary_bounds=(0, 0, 1920, 1080),
+    )
+
+    assert state is not None
+    assert (state.geometry.x, state.geometry.y) == (460, 190)
+
+
+def test_restore_window_state_clamps_a_partially_offscreen_window() -> None:
+    state = wstate.restore_window_state(
+        {
+            "window_width": 1000,
+            "window_height": 700,
+            "window_x": 1500,
+            "window_y": 1000,
+        },
+        virtual_bounds=(0, 0, 1920, 1080),
+        primary_bounds=(0, 0, 1920, 1080),
+    )
+
+    assert state is not None
+    assert (state.geometry.x, state.geometry.y) == (920, 380)
+
+
+def test_restore_window_state_keeps_negative_multi_monitor_origins() -> None:
+    state = wstate.restore_window_state(
+        {
+            "window_width": 1200,
+            "window_height": 800,
+            "window_x": -1200,
+            "window_y": 0,
+        },
+        virtual_bounds=(-1920, 0, 3840, 1080),
+        primary_bounds=(0, 0, 1920, 1080),
+    )
+
+    assert state is not None
+    assert (state.geometry.x, state.geometry.y) == (-1200, 0)
+
+
+def test_restore_window_state_shrinks_an_oversized_window() -> None:
+    state = wstate.restore_window_state(
+        {"window_width": 3000, "window_height": 2000, "window_x": 0, "window_y": 0},
+        virtual_bounds=(0, 0, 1920, 1080),
+        primary_bounds=(0, 0, 1920, 1080),
+    )
+
+    assert state is not None
+    assert (state.geometry.width, state.geometry.height) == (1920, 1080)
+
+
+@pytest.mark.parametrize("flag", [True, 1, "true", None, "yes"])
+def test_restore_window_state_restores_only_a_real_maximized_flag(
+    flag: object,
+) -> None:
+    state = wstate.restore_window_state(
+        {
+            # The geometry is unusable, but the maximized flag must survive.
+            "window_width": "wide",
+            "window_height": -1,
+            "window_maximized": flag,
+        }
+    )
+
+    assert state is not None
+    assert state.maximized is (flag is True)
+    assert state.geometry.width == wstate.DEFAULT_WINDOW_WIDTH
+    assert state.geometry.height == wstate.DEFAULT_WINDOW_HEIGHT
+
+
+def test_save_throttle_limits_writes_and_honours_force() -> None:
+    now = [100.0]
+    throttle = wstate.SaveThrottle(1.0, clock=lambda: now[0])
+
+    assert throttle.allow()
+    assert not throttle.allow()
+    now[0] = 100.9
+    assert not throttle.allow()
+    now[0] = 101.0
+    assert throttle.allow()
+    assert not throttle.allow()
+    # Closing/maximizing must never be swallowed by the interval.
+    assert throttle.allow(force=True)
+
+
+def test_save_throttle_with_a_zero_interval_always_allows() -> None:
+    throttle = wstate.SaveThrottle(0.0, clock=lambda: 5.0)
+    assert throttle.allow()
+    assert throttle.allow()
+
+
+def test_save_window_state_writes_the_desktop_prefs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    monkeypatch.setenv("NOVEL_MUSIC_HOME", str(tmp_path))
+    state = wstate.WindowState(wstate.WindowGeometry(1100, 720, 10, 20), True)
+
+    assert wa._save_window_state(state) is True
+
+    stored = json.loads((tmp_path / "desktop_prefs.json").read_text(encoding="utf-8"))
+    assert stored == {
+        "window_width": 1100,
+        "window_height": 720,
+        "window_x": 10,
+        "window_y": 20,
+        "window_maximized": True,
+    }
+    assert wstate.restore_window_state(stored) == state
+
+
+def test_window_geometry_is_not_exported_or_imported_with_settings() -> None:
+    """Geometry is device-specific: it must not travel between machines."""
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    assert not any(key.startswith("window_") for key in wa._SETTINGS_FILE_KEYS)
+
+    document = wa._settings_export_document(
+        {
+            "theme": "dark",
+            "window_width": 1100,
+            "window_height": 720,
+            "window_x": 10,
+            "window_y": 20,
+            "window_maximized": True,
+        },
+        "1.2.3",
+    )
+    assert set(document["settings"]) == set(wa._SETTINGS_FILE_KEYS)
+
+    imported = wa._settings_import_values(document)
+    assert not any(key.startswith("window_") for key in imported)
+
+
+def test_window_is_maximized_uses_the_native_state() -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    maximized = SimpleNamespace(WindowState=SimpleNamespace(name="Maximized"))
+    normal = SimpleNamespace(WindowState=SimpleNamespace(name="Normal"))
+    gtk = SimpleNamespace(is_maximized=lambda: True)
+    cocoa = SimpleNamespace(isZoomed=lambda: False)
+
+    assert wa._window_is_maximized(SimpleNamespace(native=maximized)) is True
+    assert wa._window_is_maximized(SimpleNamespace(native=normal)) is False
+    assert wa._window_is_maximized(SimpleNamespace(native=gtk)) is True
+    assert wa._window_is_maximized(SimpleNamespace(native=cocoa)) is False
+    # No native handle / no readable state: the caller falls back to events.
+    assert wa._window_is_maximized(SimpleNamespace(native=None)) is None
+    assert wa._window_is_maximized(SimpleNamespace()) is None
+
+
+def test_read_window_geometry_degrades_when_the_backend_refuses() -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    class Broken:
+        @property
+        def width(self) -> int:
+            raise RuntimeError("backend gone")
+
+    assert wa._read_window_geometry(Broken()) is None
+    assert wa._read_window_geometry(
+        SimpleNamespace(width=1100, height=720, x=5, y=6)
+    ) == wstate.WindowGeometry(1100, 720, 5, 6)
+
+
+def test_create_window_option_detection() -> None:
+    import novel_downloader.apps.desktop.webview_app as wa
+
+    def create_window(width: int = 800, maximized: bool = False) -> None: ...
+
+    fake = SimpleNamespace(create_window=create_window)
+    assert wa._create_window_supports(fake, "maximized") is True
+    assert wa._create_window_supports(fake, "minimized") is False
+
+    def opaque(*args: object, **kwargs: object) -> None: ...
+
+    assert wa._create_window_supports(SimpleNamespace(create_window=opaque), "x") is (
+        False
+    )
+
+
+# ---------------------------------------------------------------------------
 # Web front end (web_assets): single-file HTML
 # ---------------------------------------------------------------------------
 
@@ -5682,10 +5986,14 @@ def test_run_webview_app_restores_negative_window_origins() -> None:
 
     source = Path(wa.__file__).read_text(encoding="utf-8")
     assert "max(geometry.x, 0)" not in source
-    # Geometry is fitted to the current monitors instead of being clamped at
-    # zero; ``clamp_geometry`` keeps legitimate negative origins.
-    assert "clamp_geometry(geometry, _virtual_screen_rect())" in source
+    # Geometry is validated against the current monitors instead of being
+    # clamped at zero; ``restore_window_state`` keeps negative origins that
+    # still land on a connected screen and centres a vanished one.
+    assert "restore_window_state(" in source
     assert "_virtual_screen_rect()" in source
+    assert "_primary_screen_rect()" in source
+    # The persisted keys are the documented window_* prefs, not a side file.
+    assert "window_state_to_prefs(state)" in source
 
 
 # ---------------------------------------------------------------------------

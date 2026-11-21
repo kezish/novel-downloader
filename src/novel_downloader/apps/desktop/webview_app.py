@@ -24,6 +24,7 @@ import contextlib
 import dataclasses
 import errno
 import importlib.util
+import inspect
 import json
 import logging
 import math
@@ -57,6 +58,7 @@ from novel_downloader.infra.i18n import t
 if TYPE_CHECKING:
     from novel_downloader.apps.common.updater import UpdateInfo
     from novel_downloader.apps.desktop.engine import AsyncEngine
+    from novel_downloader.apps.desktop.window_state import WindowGeometry, WindowState
 
 __all__ = ["ApiBridge", "run_webview_app"]
 
@@ -477,6 +479,32 @@ def _virtual_screen_rect() -> tuple[int, int, int, int] | None:
     if rect[2] <= 0 or rect[3] <= 0:
         return None
     return rect
+
+
+def _primary_screen_rect() -> tuple[int, int, int, int] | None:
+    """
+    Rectangle of the primary monitor in virtual-desktop coordinates.
+
+    Windows always places the primary monitor at ``(0, 0)``, so the origin is
+    constant and only the size needs querying.  Used to centre a window whose
+    saved origin belongs to a monitor that has been unplugged.
+
+    :return: ``(0, 0, width, height)``, or ``None`` when the metrics are
+        unavailable (non-Windows, headless session).
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        width = int(user32.GetSystemMetrics(0))  # SM_CXSCREEN
+        height = int(user32.GetSystemMetrics(1))  # SM_CYSCREEN
+    except Exception:  # noqa: BLE001 - best effort, cosmetic only
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return (0, 0, width, height)
 
 
 def _shortcut_paths() -> tuple[Path, ...]:
@@ -6821,9 +6849,15 @@ def run_webview_app() -> int:
     import webview
 
     from novel_downloader.apps.desktop.window_state import (
-        clamp_geometry,
+        DEFAULT_WINDOW_HEIGHT,
+        DEFAULT_WINDOW_WIDTH,
+        SaveThrottle,
+        WindowGeometry,
+        WindowState,
         load_window_geometry,
+        restore_window_state,
         window_state_file,
+        window_state_to_prefs,
     )
 
     # Pin pywebview's popup policy: ``window.open``/``target=_blank`` must go
@@ -6845,21 +6879,41 @@ def run_webview_app() -> int:
     # Importing the task manager and reading tasks.json used to sit between
     # the user's click and the first paint; it now overlaps window creation.
     bridge.start_services_background()
-    geometry = load_window_geometry(window_state_file())
-    if geometry is not None:
-        # Fit the saved geometry to the *current* monitors: a window saved on
-        # a larger screen must not reopen with its right edge (and the
-        # primary buttons) clipped off-screen.
-        geometry = clamp_geometry(geometry, _virtual_screen_rect())
+
+    # The geometry lives in the desktop prefs.  Values saved on a monitor
+    # that is no longer attached are centred on the primary screen, unusable
+    # sizes fall back to the defaults, and the maximized flag is independent.
+    state = restore_window_state(
+        _load_prefs(), _virtual_screen_rect(), _primary_screen_rect()
+    )
+    if state is None:
+        # Upgrade path: builds before the prefs migration kept the geometry
+        # in window_state.json next to the prefs file.  Run it through the
+        # same validation as the prefs so a stale 400x300 file cannot reopen
+        # a window below the current minimum.
+        legacy = load_window_geometry(window_state_file())
+        if legacy is not None:
+            state = restore_window_state(
+                window_state_to_prefs(WindowState(legacy)),
+                _virtual_screen_rect(),
+                _primary_screen_rect(),
+            )
+    if state is None:
+        state = WindowState(WindowGeometry(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT))
+    geometry = state.geometry
+
     kwargs: dict[str, Any] = {
-        "width": geometry.width if geometry else 1220,
-        "height": geometry.height if geometry else 800,
+        "width": geometry.width,
+        "height": geometry.height,
         "min_size": (980, 640),
     }
-    if geometry is not None and geometry.x is not None and geometry.y is not None:
+    if geometry.x is not None and geometry.y is not None:
         # Negative origins address monitors left of/above the primary; the
-        # clamp above already kept them inside the virtual desktop.
+        # restore step already kept them inside the virtual desktop.
         kwargs["x"], kwargs["y"] = geometry.x, geometry.y
+    maximized_option = _create_window_supports(webview, "maximized")
+    if state.maximized and maximized_option:
+        kwargs["maximized"] = True
 
     window = webview.create_window(
         "书音 BookTone",
@@ -6871,31 +6925,142 @@ def run_webview_app() -> int:
     assert window is not None  # nb: pywebview types this as Optional[Window]
     bridge._attach_window(window)
 
+    # Pywebview dispatches ``moved``/``resized`` on worker threads (the
+    # ``closing`` event is synchronous), so the shared capture state is
+    # guarded.  ``normal_geometry`` deliberately holds the last *unmaximized*
+    # rectangle: while maximized, ``window.width`` reports the screen, and
+    # restoring those numbers would make the window open full-screen-sized
+    # even after un-maximizing.
+    lock = threading.Lock()
+    throttle = SaveThrottle()
+    maximized = [state.maximized]
+    normal_geometry = [geometry]
+    last_saved: list[tuple[int, int, int | None, int | None, bool] | None] = [None]
+
+    def snapshot() -> WindowState | None:
+        with lock:
+            geometry_now = normal_geometry[0]
+            if geometry_now is None:
+                return None
+            return WindowState(geometry_now, maximized[0])
+
+    def persist(force: bool = False) -> None:
+        if not throttle.allow(force=force):
+            return
+        current = snapshot()
+        if current is None:
+            return
+        key = (
+            current.geometry.width,
+            current.geometry.height,
+            current.geometry.x,
+            current.geometry.y,
+            current.maximized,
+        )
+        if key == last_saved[0]:
+            return
+        if _save_window_state(current):
+            last_saved[0] = key
+
+    def capture(force: bool = False) -> None:
+        """Refresh the normal geometry, ignoring a maximized reading."""
+        is_maximized = _window_is_maximized(window)
+        with lock:
+            if is_maximized is not None:
+                maximized[0] = is_maximized
+            # The event flag may already have been set by ``on_maximized``
+            # even when the native query said "normal" a moment earlier.
+            currently_maximized = maximized[0]
+        if currently_maximized:
+            persist(force=True)
+            return
+        geometry_now = _read_window_geometry(window)
+        if geometry_now is not None:
+            with lock:
+                normal_geometry[0] = geometry_now
+        persist(force=force)
+
+    def on_moved(*_args: Any) -> None:
+        capture()
+
+    def on_resized(*_args: Any) -> None:
+        capture()
+
+    def on_maximized(*_args: Any) -> None:
+        with lock:
+            maximized[0] = True
+        persist(force=True)
+
+    def on_restored(*_args: Any) -> None:
+        with lock:
+            maximized[0] = False
+        capture(force=True)
+
     def on_closing() -> None:
         # Geometry must be read on ``closing``: by the ``closed`` event the
         # GUI backend is already torn down and ``window.width`` raises.
-        _save_window_state(window)
+        capture(force=True)
 
     def on_closed() -> None:
         bridge.shutdown()
 
-    window.events.closing += on_closing
-    window.events.closed += on_closed
+    events = getattr(window, "events", None)
+    for name, handler in (
+        ("moved", on_moved),
+        ("resized", on_resized),
+        ("maximized", on_maximized),
+        ("restored", on_restored),
+        ("closing", on_closing),
+        ("closed", on_closed),
+    ):
+        event = getattr(events, name, None)
+        if event is None:
+            continue
+        try:
+            event += handler
+        except (AttributeError, TypeError):
+            # An older pywebview without this event simply does not report
+            # it; the closing snapshot still runs.
+            logger.debug("pywebview window event %s is unavailable", name)
+
+    if state.maximized and not maximized_option:
+        # No ``maximized`` keyword in this pywebview: maximize once the
+        # native window exists.
+        shown = getattr(events, "shown", None)
+        if shown is not None:
+
+            def _maximize_on_show(*_args: Any) -> None:
+                with contextlib.suppress(Exception):
+                    window.maximize()
+
+            with contextlib.suppress(AttributeError, TypeError):
+                shown += _maximize_on_show
+
     webview.start()
     return 0
 
 
-def _save_window_state(window: Any) -> None:
-    """Persist the closing window geometry in the format ``load`` accepts."""
-    from novel_downloader.apps.desktop.window_state import (
-        clamp_geometry,
-        save_window_geometry,
-        window_geometry_from_mapping,
-        window_state_file,
-    )
+def _create_window_supports(webview: Any, option: str) -> bool:
+    """Whether this pywebview's ``create_window`` accepts *option*."""
+    try:
+        parameters = inspect.signature(webview.create_window).parameters
+    except (TypeError, ValueError):
+        return False
+    return option in parameters
+
+
+def _read_window_geometry(window: Any) -> WindowGeometry | None:
+    """
+    Read the live window rectangle, or ``None`` when the backend cannot.
+
+    Older pywebview versions (and backends without geometry reporting) raise
+    from the ``width``/``height`` accessors; that must not break dragging or
+    closing, so every failure degrades to "no update".
+    """
+    from novel_downloader.apps.desktop.window_state import window_geometry_from_mapping
 
     try:
-        geometry = window_geometry_from_mapping(
+        return window_geometry_from_mapping(
             {
                 "width": int(window.width),
                 "height": int(window.height),
@@ -6904,11 +7069,45 @@ def _save_window_state(window: Any) -> None:
             }
         )
     except Exception:  # noqa: BLE001 - backend may be going away mid-read
-        logger.debug("Could not read the window geometry on close", exc_info=True)
-        return
-    if geometry is None:
-        return
+        logger.debug("Could not read the window geometry", exc_info=True)
+        return None
+
+
+def _window_is_maximized(window: Any) -> bool | None:
+    """
+    Ask the native window whether it is maximized.
+
+    pywebview up to 6.x exposes no public ``maximized`` getter, and its
+    Windows backend emits ``resized`` before ``maximized``, so the event
+    alone can briefly misreport the screen-sized rectangle as a normal one.
+    The native object is queried instead — WinForms ``WindowState``, GTK
+    ``is_maximized()``, macOS ``isZoomed`` — and ``None`` means "unknown"
+    (fall back to the event flag).
+
+    :param window: A pywebview ``Window``.
+    :return: ``True``/``False`` when known, ``None`` otherwise.
+    """
+    native = getattr(window, "native", None)
+    if native is None:
+        return None
     try:
-        save_window_geometry(window_state_file(), clamp_geometry(geometry))
-    except OSError:
-        logger.debug("Could not persist window state", exc_info=True)
+        state = getattr(native, "WindowState", None)
+        if state is not None:
+            name = getattr(state, "name", "")
+            if name:
+                return name == "Maximized"
+            return int(state) == 2  # FormWindowState.Maximized
+        if hasattr(native, "is_maximized"):
+            return bool(native.is_maximized())
+        if hasattr(native, "isZoomed"):
+            return bool(native.isZoomed())
+    except Exception:  # noqa: BLE001 - property access may cross threads
+        logger.debug("Could not query the native window state", exc_info=True)
+    return None
+
+
+def _save_window_state(state: WindowState) -> bool:
+    """Persist the window state in the desktop prefs (best effort)."""
+    from novel_downloader.apps.desktop.window_state import window_state_to_prefs
+
+    return _save_prefs(window_state_to_prefs(state)) is not False
