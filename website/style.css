@@ -77,7 +77,8 @@ svg { display: block; }
 .lang-btn:focus-visible, .icon-btn:focus-visible, .btn:focus-visible,
 .download-card:focus-visible, .dl-link:focus-visible,
 .faq summary:focus-visible,
-.foot-links a:focus-visible, .to-top:focus-visible, .error-nav a:focus-visible {
+.foot-links a:focus-visible, .to-top:focus-visible, .error-nav a:focus-visible,
+.copy-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -622,6 +623,45 @@ svg { display: block; }
   background: #5a6e8c; border-radius: 99px;
 }
 
+/* ============================================================ copy buttons
+   One native button per command block. It ships with the `hidden` attribute
+   (and the head <noscript> block keeps it hidden), so a visitor without
+   JavaScript never sees a control that cannot work; main.js reveals the ones
+   whose data-copy-target resolves. Comment spans (.c) are excluded from the
+   copied text by the script, not by the CSS. */
+.code-block { position: relative; }
+.code-tools {
+  display: flex; align-items: center; justify-content: flex-end;
+  gap: 8px; padding: 12px 24px 0;
+}
+.copy-status {
+  margin-right: auto; font-size: 12px; line-height: 1.5;
+  color: #c7d3e3;
+}
+.copy-btn {
+  flex: none; display: inline-flex; align-items: center;
+  padding: 5px 11px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--card);
+  color: var(--text-2); font: 600 12px/1.2 inherit;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.copy-btn:hover { color: var(--accent-ink); border-color: var(--accent); }
+/* author display would beat the UA [hidden] rule, so opt back in explicitly */
+.copy-btn[hidden] { display: none; }
+.copy-btn-text { letter-spacing: .02em; }
+.tab-panel .copy-btn {
+  color: #c7d3e3; background: rgba(255, 255, 255, .06);
+  border-color: rgba(255, 255, 255, .18);
+}
+.tab-panel .copy-btn:hover {
+  color: #fff; background: rgba(255, 255, 255, .11);
+  border-color: rgba(255, 255, 255, .42);
+}
+/* the accent ring is dark-on-dark inside the code panel; reuse the tab cue */
+.tab-panel .copy-btn:focus-visible { outline-color: var(--code-text); }
+.verify-dl .code-tools { padding: 4px 14px 0; }
+.verify-dl .copy-status { color: var(--text-3); }
+
 /* ============================================================ reduced motion
    Last in the file on purpose: it must win over the animations and
    transitions declared above. */
@@ -630,7 +670,7 @@ svg { display: block; }
   .js .reveal, .reveal { opacity: 1; transform: none; transition: none; }
   .aw-progress i { animation: none; }
   .card, .client-card, .appwin, .to-top, .btn, .tab, .icon-btn, .dl-link,
-  .faq summary::after, .skip-link { transition: none; }
+  .copy-btn, .faq summary::after, .skip-link { transition: none; }
   /* Transitions are gone, but hover/press transforms would still snap into
      place; drop the movement itself for reduced-motion users. */
   .btn:hover, .btn:active, .card:hover, .client-card:hover, .icon-btn:active,

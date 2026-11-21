@@ -23,6 +23,7 @@ import re
 import shutil
 import struct
 import subprocess
+from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -1420,7 +1421,7 @@ def test_verification_commands_are_executable_and_cover_the_apk(
     the APK, and ``Get-FileHash`` deduplicates the overlap between them.
     """
     block = _verify_dl_block(html_text)
-    code = " ".join(re.findall(r"<code>(.*?)</code>", block, re.S))
+    code = " ".join(re.findall(r"<code\b[^>]*>(.*?)</code>", block, re.S))
     code = re.sub(r"<[^>]+>", "", code)
 
     # the PowerShell recipe is a single Get-FileHash call over globs
@@ -1987,3 +1988,179 @@ def test_css_has_no_unused_class_rules(
         if not re.search(rf'class="[^"]*\b{re.escape(name)}\b', pages)
     )
     assert not unused, f"CSS rules match no element: {unused}"
+
+
+# --------------------------------------------------------------------------
+# copy-to-clipboard contract
+#
+# The quick-start panels and the checksum card are the only places where a
+# reader is expected to paste a command into a shell, so they are the only
+# blocks that carry a copy button. The engine panel is pure prose in a <pre>
+# (no command), the PyPI card's inline <code> is already a one-line snippet.
+# --------------------------------------------------------------------------
+COPY_BUTTON_TARGETS = {
+    "copy-cli": "code-cli",
+    "copy-api": "code-api",
+    "copy-desktop": "code-desktop",
+    "copy-android": "code-android",
+    "copy-verify-ps": "code-verify-ps",
+    "copy-verify-shasum": "code-verify-shasum",
+}
+
+COPY_EXPECTED_COMMAND = {
+    "code-cli": "pip install -U novel-downloader",
+    "code-api": 'pip install "novel-downloader[api]"',
+    "code-desktop": "novel-desktop",
+    "code-android": "./gradlew assembleRelease",
+    "code-verify-ps": "Get-FileHash",
+    "code-verify-shasum": "sha256sum",
+}
+
+
+def _copy_buttons(doc: _Doc) -> list[dict[str, str]]:
+    return [
+        data
+        for data, _ in doc.by_tag("button")
+        if "copy-btn" in data.get("class", "").split()
+    ]
+
+
+def _copied_line_text(html_text: str, code_id: str) -> str:
+    """Simulate main.js: clone the code node, drop span.c, read textContent."""
+    match = re.search(
+        rf'<code\b[^>]*\bid="{re.escape(code_id)}"[^>]*>(.*?)</code>',
+        html_text,
+        re.S,
+    )
+    assert match is not None, f"missing code block: {code_id}"
+    body = re.sub(r'<span class="c"[^>]*>.*?</span>', "", match.group(1), flags=re.S)
+    body = unescape(re.sub(r"<[^>]+>", "", body))
+    lines = [line.rstrip() for line in body.splitlines()]
+    # mirror main.js: bare URLs are instructions, not shell commands
+    lines = [line for line in lines if not re.fullmatch(r"https?://\S+", line)]
+    return "\n".join(line for line in lines if line.strip())
+
+
+def test_copy_buttons_pair_one_to_one_with_code_blocks(
+    doc: _Doc, html_text: str
+) -> None:
+    buttons = _copy_buttons(doc)
+    assert len(buttons) == len(COPY_BUTTON_TARGETS)
+    ids = [data.get("id", "") for data in buttons]
+    assert len(ids) == len(set(ids)), "duplicate copy button ids"
+    assert set(ids) == set(COPY_BUTTON_TARGETS)
+
+    code_ids = {data.get("id") for data, _ in doc.by_tag("code")}
+    for data in buttons:
+        assert data.get("type") == "button"
+        assert data.get("data-copy-target") in code_ids, data
+        assert data["data-copy-target"] == COPY_BUTTON_TARGETS[data["id"]]
+
+    # exactly one button and one target code element per wrapper. The wrapper
+    # has no nested <div> after the toolbar, so slicing to the closing </pre>
+    # is unambiguous.
+    blocks = re.findall(
+        r'<div class="code-block">(.*?)</pre>\s*</div>', html_text, re.S
+    )
+    assert len(blocks) == len(COPY_BUTTON_TARGETS)
+    for block in blocks:
+        buttons = re.findall(
+            r'class="copy-btn" id="([^"]+)"[^>]*data-copy-target="([^"]+)"', block
+        )
+        codes = re.findall(r'<code id="([^"]+)"', block)
+        assert len(buttons) == 1, block[:120]
+        assert len(codes) == 1, block[:120]
+        assert buttons[0][1] == codes[0], "button and code are not paired in one block"
+
+
+def test_copy_buttons_are_bilingual_and_announce_status(doc: _Doc, js: str) -> None:
+    specs = {
+        row[0]: (row[1], row[2])
+        for row in re.findall(r'\[\s*"([a-z0-9-]+)",\s*"([^"]*)",\s*"([^"]*)"\s*\]', js)
+    }
+    for data in _copy_buttons(doc):
+        spec = specs.get(data["id"])
+        assert spec is not None, f"no LABEL_SPECS row for {data['id']}"
+        assert data.get("aria-label") == spec[0]
+        assert not CJK.search(spec[1]), f"{data['id']} en label contains Chinese"
+
+    labels = [
+        data
+        for data, _ in doc.by_tag("span")
+        if "copy-btn-text" in data.get("class", "").split()
+    ]
+    assert len(labels) == len(COPY_BUTTON_TARGETS)
+    assert all(data.get("data-en") == "Copy" for data in labels)
+
+    statuses = [
+        data
+        for data, _ in doc.by_tag("p")
+        if "copy-status" in data.get("class", "").split()
+    ]
+    assert len(statuses) == len(COPY_BUTTON_TARGETS)
+    for data in statuses:
+        assert data.get("role") == "status"
+        assert data.get("aria-live") == "polite"
+
+
+def test_copy_script_keeps_clipboard_and_manual_fallbacks(js: str) -> None:
+    # fast path
+    assert "navigator.clipboard" in js
+    assert ".writeText(" in js
+    # first fallback: the legacy command
+    assert re.search(r'document\.execCommand\(\s*"copy"\s*\)', js)
+    # second fallback: select the block and tell the reader to press Ctrl+C
+    assert "selectNodeContents" in js
+    assert "getSelection()" in js
+    assert re.search(r'copyFeedback\(btn, "failed", "failedNote"\)', js)
+    assert re.search(r'copyFeedback\(btn, "copied", "copiedNote"\)', js)
+    # the button returns to its base label after two seconds
+    assert re.search(r"\},\s*2000\);", js)
+    # comments are removed structurally, not by guessing which lines start "#"
+    assert "cloneNode(true)" in js
+    assert 'querySelectorAll(".c")' in js
+    # a prompt pasted into a block is not carried into the clipboard
+    assert r"(?:\$|PS>)" in js
+    # bare release URLs are dropped; URLs inside a command are kept
+    assert "https?:" in js
+
+
+def test_copy_buttons_are_inert_without_javascript(
+    doc: _Doc, html_text: str, css: str, js: str
+) -> None:
+    for data in _copy_buttons(doc):
+        assert "hidden" in data, f"{data['id']} must start hidden"
+    # main.js reveals only the buttons whose target resolves
+    assert re.search(r"if \(copyTarget\(btn\)\) btn\.hidden = false", js)
+    # no-JS contract: the head <noscript> hides them even if CSS loads first
+    match = re.search(
+        r"<noscript>\s*<style>(.*?)</style>\s*</noscript>", html_text, re.S
+    )
+    assert match is not None
+    assert re.search(r"\.copy-btn\s*\{[^}]*display:\s*none", match.group(1))
+    # author display rules otherwise beat the UA [hidden] rule
+    assert "display: none" in _rule(css, ".copy-btn[hidden]")
+    # the code itself stays selectable, so a no-JS reader can still copy it
+    assert "user-select: none" in _rule(css, ".tab-panel .c")
+
+
+def test_copied_text_is_command_only(html_text: str) -> None:
+    for code_id in COPY_BUTTON_TARGETS.values():
+        text = _copied_line_text(html_text, code_id)
+        assert text, f"{code_id} copies nothing"
+        assert COPY_EXPECTED_COMMAND[code_id] in text
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            assert not stripped.startswith("#"), f"{code_id}: comment line copied"
+            assert not stripped.startswith("$"), f"{code_id}: prompt copied"
+            assert not re.fullmatch(r"https?://\S+", stripped), (
+                f"{code_id}: bare URL copied"
+            )
+        assert "#" not in text, f"{code_id}: inline comment copied"
+        assert "$" not in text, f"{code_id}: prompt copied"
+    # the prose halves of the multilingual comments never reach the clipboard
+    for phrase in ("一键安装", "默认搜索全部平台", "藏青与暖橙", "内嵌 Python"):
+        assert all(
+            phrase not in _copied_line_text(html_text, code_id)
+            for code_id in COPY_BUTTON_TARGETS.values()
+        ), phrase

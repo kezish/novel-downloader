@@ -564,3 +564,43 @@ def test_404_title_is_present_and_single_line(error_text: str) -> None:
     title = match.group(1).strip()
     assert title and "\n" not in title
     assert "404" in title
+
+
+# --------------------------------------------------------------------------
+# copy button state dictionary
+# --------------------------------------------------------------------------
+COPY_STATE_KEYS = {"base", "copied", "failed", "copiedNote", "failedNote"}
+
+
+def _copy_text_rows(js: str) -> dict[str, tuple[str, str]]:
+    match = re.search(r"const COPY_TEXT = \{(.*?)\n\};", js, re.S)
+    assert match is not None, "COPY_TEXT is missing from main.js"
+    rows = re.findall(
+        r'(\w+):\s*\{\s*zh:\s*"([^"]*)",\s*en:\s*"([^"]*)"\s*,?\s*\}',
+        match.group(1),
+    )
+    assert rows, "COPY_TEXT parsed to zero rows"
+    return {key: (zh, en) for key, zh, en in rows}
+
+
+def test_copy_state_dictionary_covers_both_languages(js: str) -> None:
+    """The transient "copied / failed" label and its live-region note are not
+    data-en attributes, so the switch path is this dictionary alone."""
+    rows = _copy_text_rows(js)
+    assert set(rows) == COPY_STATE_KEYS, sorted(rows)
+
+    problems = []
+    for key, (zh, en) in rows.items():
+        if not zh.strip() or not en.strip():
+            problems.append(f"{key}: empty value")
+        if zh == en:
+            problems.append(f"{key}: zh and en are identical")
+        if CJK.search(en):
+            problems.append(f"{key}: en contains Chinese: {en!r}")
+    assert not problems, problems[:5]
+
+    # and the feedback path actually reads the keys it declares
+    for key in ("copied", "failed", "copiedNote", "failedNote"):
+        assert f'"{key}"' in js, f"{key} is never read"
+    assert "COPY_TEXT[labelKey][copyLang()]" in js
+    assert "COPY_TEXT[noteKey][copyLang()]" in js

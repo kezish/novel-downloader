@@ -79,6 +79,14 @@ const LABEL_SPECS = [
   ["nav-links", "主导航", "Main navigation"],
   ["mobile-menu", "主导航", "Main navigation"],
   ["foot-links", "页脚链接", "Footer links"],
+  // one row per copy button: the label names the block, not the action, so a
+  // screen reader can tell six identical "Copy" buttons apart
+  ["copy-cli", "复制 CLI 命令", "Copy CLI commands"],
+  ["copy-api", "复制 REST API 命令", "Copy REST API commands"],
+  ["copy-desktop", "复制桌面端命令", "Copy desktop commands"],
+  ["copy-android", "复制 Android 命令", "Copy Android commands"],
+  ["copy-verify-ps", "复制 PowerShell 校验命令", "Copy PowerShell checksum command"],
+  ["copy-verify-shasum", "复制 macOS / Linux 校验命令", "Copy macOS/Linux checksum commands"],
 ];
 const PAGE_TITLE = {
   zh: "书音 BookTone — 小说与音乐 · 多站点聚合 · 四端同源",
@@ -199,6 +207,146 @@ if (tabBar) {
   const valid = saved && tabs.some((t) => t.dataset.tab === saved);
   activateTab(valid ? saved : "cli");
 })();
+
+/* ------------------------------------------------ copy buttons
+   Commands live in <pre><code>; explanatory prose is wrapped in span.c so it
+   is already unselectable. The copy path clones the code node, drops those
+   spans and any shell prompt, and only then reads textContent — a paste never
+   carries "# ..." notes. navigator.clipboard is the fast path; a rejected or
+   missing API falls back to execCommand("copy"), and if that fails too the
+   command is selected in place and the live region tells the reader to press
+   Ctrl+C. */
+const COPY_TEXT = {
+  base: { zh: "复制", en: "Copy" },
+  copied: { zh: "已复制", en: "Copied" },
+  failed: { zh: "复制失败", en: "Failed" },
+  copiedNote: { zh: "已复制到剪贴板", en: "Copied to clipboard" },
+  failedNote: {
+    zh: "自动复制失败，命令已选中，请按 Ctrl+C（macOS 为 Cmd+C）手动复制",
+    en: "Automatic copy failed. The command is selected — press Ctrl+C (Cmd+C on macOS) to copy it.",
+  },
+};
+function copyLang() {
+  return document.documentElement.lang === "en" ? "en" : "zh";
+}
+function copyBlockOf(btn) {
+  return btn.closest(".code-block");
+}
+function copyTarget(btn) {
+  const id = btn.dataset.copyTarget;
+  const byId = id ? document.getElementById(id) : null;
+  if (byId) return byId;
+  const block = copyBlockOf(btn);
+  return block ? block.querySelector("code, pre") : null;
+}
+function copyTextOf(btn) {
+  const code = copyTarget(btn);
+  if (!code) return "";
+  const clone = code.cloneNode(true);
+  clone.querySelectorAll(".c").forEach((node) => node.remove());
+  return clone.textContent
+    .split("\n")
+    .map((line) => line.replace(/^\s*(?:\$|PS>)\s+/, "").replace(/\s+$/, ""))
+    // a bare release URL is an instruction, not a command: pasting it into a
+    // shell errors out. Links embedded in a command (irm https://…) stay.
+    .filter((line) => !/^https?:\/\/\S+$/.test(line))
+    .filter((line) => line.trim() !== "")
+    .join("\n");
+}
+function selectCopyText(btn) {
+  const code = copyTarget(btn);
+  if (!code || !window.getSelection) return false;
+  const pre = code.closest("pre");
+  if (pre) pre.focus({ preventScroll: true });
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(code);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function execCommandCopy(text) {
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.setAttribute("aria-hidden", "true");
+  area.style.position = "fixed";
+  area.style.top = "0";
+  area.style.left = "-9999px";
+  document.body.appendChild(area);
+  let ok = false;
+  try {
+    area.select();
+    area.setSelectionRange(0, text.length);
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+  area.remove();
+  return ok;
+}
+function copyFeedback(btn, labelKey, noteKey) {
+  const textEl = btn.querySelector(".copy-btn-text") || btn;
+  // Capture the zh base before the transient label overwrites it: applyLang()
+  // caches dataset.zh from whatever innerHTML it finds on its first switch.
+  if (textEl !== btn && textEl.dataset.zh === undefined) {
+    textEl.dataset.zh = textEl.textContent;
+  }
+  clearTimeout(btn.copyTimer);
+  textEl.textContent = COPY_TEXT[labelKey][copyLang()];
+  const block = copyBlockOf(btn);
+  const status = block ? block.querySelector(".copy-status") : null;
+  if (status) {
+    clearTimeout(status.copyTimer);
+    status.textContent = "";
+    // re-setting the same string in the same frame is not re-announced
+    status.copyTimer = setTimeout(() => {
+      status.textContent = COPY_TEXT[noteKey][copyLang()];
+    }, 30);
+  }
+  btn.copyTimer = setTimeout(() => {
+    textEl.textContent =
+      copyLang() === "en"
+        ? textEl.dataset.en || COPY_TEXT.base.en
+        : textEl.dataset.zh || COPY_TEXT.base.zh;
+  }, 2000);
+}
+async function copyBlock(btn) {
+  const text = copyTextOf(btn);
+  let ok = false;
+  if (text && navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch {
+      ok = false; /* insecure origin or permission denied: fall through */
+    }
+  }
+  if (!ok && text) ok = execCommandCopy(text);
+  if (ok) {
+    btn.focus({ preventScroll: true });
+    copyFeedback(btn, "copied", "copiedNote");
+  } else {
+    if (text) selectCopyText(btn);
+    copyFeedback(btn, "failed", "failedNote");
+  }
+}
+const copyButtons = $$(".copy-btn");
+copyButtons.forEach((btn) => {
+  // A button whose target never resolves stays hidden instead of failing late.
+  if (copyTarget(btn)) btn.hidden = false;
+});
+if (copyButtons.length) {
+  document.addEventListener("click", (event) => {
+    const btn =
+      event.target instanceof Element ? event.target.closest(".copy-btn") : null;
+    if (btn) copyBlock(btn);
+  });
+}
 
 /* ------------------------------------------------ scroll reveal */
 const revealables = $$(".reveal");

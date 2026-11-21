@@ -58,6 +58,9 @@
   .tab-panel { display: block; }
   .tab-panel + .tab-panel pre { border-top: 1px solid rgba(255,255,255,.08); }
   #lang-btn, #theme-btn, #burger-btn { display: none; }
+  /* the copy buttons start hidden and are only revealed by main.js */
+  .copy-btn { display: none; }
+  .code-tools { padding: 0; }
   @media (max-width: 760px) { .mobile-menu { display: flex; } }
 </style>
 </noscript>
@@ -342,7 +345,12 @@
           <button type="button" class="tab" id="tab-engine" role="tab" aria-selected="false" aria-controls="panel-engine" tabindex="-1" data-tab="engine" data-en="Standalone">独立引擎</button>
         </div>
         <div class="tab-panel active" id="panel-cli" role="tabpanel" aria-labelledby="tab-cli" tabindex="0" data-panel="cli">
-          <pre tabindex="0"><code><span class="c" data-en="# Windows one-line install (PowerShell, no admin needed)"># Windows 一键安装（PowerShell，无需管理员）</span>
+          <div class="code-block">
+            <div class="code-tools">
+              <p class="copy-status" role="status" aria-live="polite"></p>
+              <button type="button" class="copy-btn" id="copy-cli" aria-label="复制 CLI 命令" data-copy-target="code-cli" hidden><span class="copy-btn-text" data-en="Copy">复制</span></button>
+            </div>
+            <pre tabindex="0"><code id="code-cli"><span class="c" data-en="# Windows one-line install (PowerShell, no admin needed)"># Windows 一键安装（PowerShell，无需管理员）</span>
 irm https://raw.githubusercontent.com/lingyi-ling/novel-downloader/main/bin/install.ps1 | iex
 
 <span class="c" data-en="# Linux / macOS one-line install"># Linux / macOS 一键安装</span>
@@ -366,9 +374,15 @@ novel-cli update --check
 <span class="c" data-en="# Follow updates + music"># 追更 + 音乐</span>
 novel-cli follow add qidian 107580
 novel-cli music search "晴天"  <span class="c" data-en="# searches every platform by default"># 默认搜索全部平台</span></code></pre>
+          </div>
         </div>
         <div class="tab-panel" id="panel-api" role="tabpanel" aria-labelledby="tab-api" tabindex="0" data-panel="api">
-          <pre tabindex="0"><code><span class="c" data-en="# Start the local REST service (127.0.0.1:8081)"># 启动本地 REST 服务（127.0.0.1:8081）</span>
+          <div class="code-block">
+            <div class="code-tools">
+              <p class="copy-status" role="status" aria-live="polite"></p>
+              <button type="button" class="copy-btn" id="copy-api" aria-label="复制 REST API 命令" data-copy-target="code-api" hidden><span class="copy-btn-text" data-en="Copy">复制</span></button>
+            </div>
+            <pre tabindex="0"><code id="code-api"><span class="c" data-en="# Start the local REST service (127.0.0.1:8081)"># 启动本地 REST 服务（127.0.0.1:8081）</span>
 pip install "novel-downloader[api]"
 novel-api
 
@@ -381,9 +395,15 @@ curl -X POST http://127.0.0.1:8081/api/v1/search \
 curl -X POST http://127.0.0.1:8081/api/v1/tasks \
   -H "Content-Type: application/json" \
   -d '{"site": "qidian", "book_id": "107580", "title": "凡人修仙传"}'</code></pre>
+          </div>
         </div>
         <div class="tab-panel" id="panel-desktop" role="tabpanel" aria-labelledby="tab-desktop" tabindex="0" data-panel="desktop">
-          <pre tabindex="0"><code><span class="c" data-en="# Install (includes the pywebview desktop shell)"># 安装（含 pywebview 桌面壳）</span>
+          <div class="code-block">
+            <div class="code-tools">
+              <p class="copy-status" role="status" aria-live="polite"></p>
+              <button type="button" class="copy-btn" id="copy-desktop" aria-label="复制桌面端命令" data-copy-target="code-desktop" hidden><span class="copy-btn-text" data-en="Copy">复制</span></button>
+            </div>
+            <pre tabindex="0"><code id="code-desktop"><span class="c" data-en="# Install (includes the pywebview desktop shell)"># 安装（含 pywebview 桌面壳）</span>
 pip install -U novel-downloader
 
 <span class="c" data-en="# Launch the GUI"># 启动图形界面</span>
@@ -392,9 +412,15 @@ novel-desktop
 <span class="c" data-en="# Navy &amp; orange dual theme · live download progress · site health checks
 # Ctrl+1-6 switches the six pages"># 藏青与暖橙双主题 · 实时下载进度 · 平台健康检查
 # Ctrl+1-6 切换六个页面</span></code></pre>
+          </div>
         </div>
         <div class="tab-panel" id="panel-android" role="tabpanel" aria-labelledby="tab-android" tabindex="0" data-panel="android">
-          <pre tabindex="0"><code><span class="c" data-en="# 1. Download the signed APK from Releases (no build needed)"># 1. 直接下载签名 APK（无需自行打包）</span>
+          <div class="code-block">
+            <div class="code-tools">
+              <p class="copy-status" role="status" aria-live="polite"></p>
+              <button type="button" class="copy-btn" id="copy-android" aria-label="复制 Android 命令" data-copy-target="code-android" hidden><span class="copy-btn-text" data-en="Copy">复制</span></button>
+            </div>
+            <pre tabindex="0"><code id="code-android"><span class="c" data-en="# 1. Download the signed APK from Releases (no build needed)"># 1. 直接下载签名 APK（无需自行打包）</span>
 https://github.com/lingyi-ling/novel-downloader/releases/latest
 
 <span class="c" data-en="# 2. Install it, then choose a mode in Settings:"># 2. 安装后到设置页选择模式：</span>
@@ -406,6 +432,7 @@ git clone https://github.com/lingyi-ling/novel-downloader
 cd novel-downloader/android
 ./gradlew assembleRelease
 <span class="c" data-en="# — or flip on the standalone engine in the app: embedded Python, full service layer on the phone"># ——或在 App 内开启「独立引擎」，内嵌 Python，手机单机直跑全套服务层</span></code></pre>
+          </div>
         </div>
         <div class="tab-panel" id="panel-engine" role="tabpanel" aria-labelledby="tab-engine" tabindex="0" data-panel="engine">
           <pre tabindex="0"><code><span class="c" data-en="# Android app → Settings → enable the standalone engine"># Android App → 设置 → 开启「独立引擎」</span>
@@ -455,10 +482,22 @@ cd novel-downloader/android
           </summary>
           <p data-en="Every release includes a SHA256SUMS.txt listing each file with its SHA-256; the latest.json read by in-app updates carries the same digests. Hash the file you downloaded and compare it with its line in the list — matching digests mean the bytes are intact.">每个版本都附 SHA256SUMS.txt，逐行列出文件名与 SHA-256；自动更新读取的 latest.json 携带同一批校验值。对下载好的文件算一次哈希，与清单中对应行比对：一致即说明文件完整、未被改动。</p>
           <p><strong data-en="Windows (PowerShell)">Windows（PowerShell）</strong></p>
-          <pre tabindex="0"><code>Get-FileHash .\NovelDownloader-*, .\novel-* -Algorithm SHA256</code></pre>
+          <div class="code-block">
+            <div class="code-tools">
+              <p class="copy-status" role="status" aria-live="polite"></p>
+              <button type="button" class="copy-btn" id="copy-verify-ps" aria-label="复制 PowerShell 校验命令" data-copy-target="code-verify-ps" hidden><span class="copy-btn-text" data-en="Copy">复制</span></button>
+            </div>
+            <pre tabindex="0"><code id="code-verify-ps">Get-FileHash .\NovelDownloader-*, .\novel-* -Algorithm SHA256</code></pre>
+          </div>
           <p><strong>macOS / Linux</strong></p>
-          <pre tabindex="0"><code>shasum -a 256 NovelDownloader-*.zip novel-downloader-*.apk   <span class="c" data-en="# macOS"># macOS</span>
+          <div class="code-block">
+            <div class="code-tools">
+              <p class="copy-status" role="status" aria-live="polite"></p>
+              <button type="button" class="copy-btn" id="copy-verify-shasum" aria-label="复制 macOS / Linux 校验命令" data-copy-target="code-verify-shasum" hidden><span class="copy-btn-text" data-en="Copy">复制</span></button>
+            </div>
+            <pre tabindex="0"><code id="code-verify-shasum">shasum -a 256 NovelDownloader-*.zip novel-downloader-*.apk   <span class="c" data-en="# macOS"># macOS</span>
 sha256sum NovelDownloader-*.zip novel-downloader-*.apk      <span class="c" data-en="# Linux"># Linux</span></code></pre>
+          </div>
           <div class="verify-links">
             <a class="dl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/latest/download/SHA256SUMS.txt" target="_blank" rel="noopener">SHA256SUMS.txt →</a>
             <a class="dl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/latest/download/latest.json" target="_blank" rel="noopener">latest.json →</a>
