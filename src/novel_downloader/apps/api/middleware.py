@@ -47,6 +47,11 @@ Request-hardening helpers shared by the REST API application.
   slowly changing reference data, ``no-store`` for live data and for every
   error response, long-lived public caching for exported files. A header set
   by a route (the SSE streams' ``no-cache``) is never overridden.
+* :class:`ConditionalGetMiddleware` adds a strong ``ETag`` to the cacheable
+  reference ``GET`` endpoints and answers a matching ``If-None-Match`` with
+  ``304 Not Modified`` and no body, so a polling client transfers headers
+  instead of a payload. Only explicitly listed idempotent endpoints take
+  part; live and credential-bearing paths never receive a validator.
 * :class:`SecurityHeadersMiddleware` adds ``X-Content-Type-Options: nosniff``
   and ``Referrer-Policy: no-referrer`` to API and download responses, and a
   sandboxing ``Content-Security-Policy`` to ``/downloads`` so an exported
@@ -79,6 +84,13 @@ from fastapi.responses import JSONResponse
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_403_FORBIDDEN
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from novel_downloader.apps.common.conditional_get import (
+    ETAG_ENDPOINTS,
+    ETAG_MAX_BODY_BYTES,
+    if_none_match_matches,
+    make_strong_etag,
+)
 
 from .auth import AUTH_ERROR_DETAIL, is_authorized
 
@@ -916,6 +928,235 @@ class CacheControlMiddleware:
         await self.app(scope, receive, send_with_cache)
 
 
+def _response_header(
+    headers: list[tuple[bytes, bytes]],
+    name: str,
+) -> str | None:
+    """Return the decoded value of ``name`` in a raw response header list."""
+    wanted = name.lower().encode("latin-1")
+    for raw_name, raw_value in headers:
+        if raw_name.lower() == wanted:
+            return raw_value.decode("latin-1")
+    return None
+
+
+def _set_response_header(
+    headers: list[tuple[bytes, bytes]],
+    name: str,
+    value: str,
+) -> None:
+    """Set (or replace) one header in a raw response header list."""
+    wanted = name.lower().encode("latin-1")
+    encoded = value.encode("latin-1")
+    for index, (raw_name, _raw_value) in enumerate(headers):
+        if raw_name.lower() == wanted:
+            headers[index] = (raw_name, encoded)
+            return
+    headers.append((name.encode("latin-1"), encoded))
+
+
+def _remove_response_header(
+    headers: list[tuple[bytes, bytes]],
+    name: str,
+) -> None:
+    """Drop every occurrence of ``name`` from a raw response header list."""
+    wanted = name.lower().encode("latin-1")
+    headers[:] = [
+        (raw_name, raw_value)
+        for raw_name, raw_value in headers
+        if raw_name.lower() != wanted
+    ]
+
+
+class ConditionalGetMiddleware:
+    """
+    Answer a matching ``If-None-Match`` request with ``304 Not Modified``.
+
+    Only the endpoints in :data:`ETAG_ENDPOINTS` participate: the reference
+    ``GET`` routes whose bodies are idempotent, non-sensitive and already
+    marked ``private, max-age=60`` by :class:`CacheControlMiddleware`. Live
+    or credential-bearing paths (``/tasks*``, ``/login*``, ``/music/jobs*``
+    and everything else) never receive a validator, so a stale client cannot
+    revalidate them into a false cache hit.
+
+    For an eligible ``200`` the body is buffered (up to ``max_body_bytes``)
+    and the response head is held back until the final chunk arrives; the
+    strong entity tag of the exact bytes is then added as ``ETag``. A
+    matching ``If-None-Match`` — weak comparison, so ``W/"..."`` matches too,
+    a comma-separated list matches on any member, and ``*`` matches always —
+    turns the response into ``304`` with no body. ``ETag`` is kept; the outer
+    :class:`CacheControlMiddleware`, security-header and request-id layers
+    stamp ``Cache-Control``, ``no-store``-free success headers and
+    ``X-Request-ID`` on the 304 exactly as they would on a ``200``.
+
+    A response whose declared or actual size exceeds ``max_body_bytes`` is
+    passed through unbuffered and without an ``ETag`` (logged at ``DEBUG``):
+    hashing a very large body would cost more than the bandwidth saved. A
+    route that already set an ``ETag`` is left alone, and non-``200``
+    responses (errors, redirects) never get one.
+
+    The middleware only rewrites the response head and, for a 304, drops
+    ``Content-Length``/``Content-Type`` (a 304 has no message body). Request
+    bodies are never read.
+
+    :param app: The wrapped ASGI application.
+    :param endpoints: Paths (``routed_path`` form) that take part.
+    :param max_body_bytes: Largest body that is buffered and hashed.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        endpoints: Iterable[str] = ETAG_ENDPOINTS,
+        max_body_bytes: int = ETAG_MAX_BODY_BYTES,
+    ) -> None:
+        self.app = app
+        self.endpoints = frozenset(path.rstrip("/") or "/" for path in endpoints)
+        self.max_body_bytes = int(max_body_bytes)
+
+    def _applies(self, method: str, path: str) -> bool:
+        """Whether this request is an eligible conditional ``GET``."""
+        return method == "GET" and (path.rstrip("/") or "/") in self.endpoints
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = str(scope.get("method", ""))
+        if not self._applies(method, routed_path(scope)):
+            await self.app(scope, receive, send)
+            return
+
+        if_none_match = Headers(scope=scope).get("if-none-match")
+        start: Message | None = None
+        released = False
+        streaming = False
+        buffered = bytearray()
+
+        async def send_start() -> None:
+            """Send the held-back response head exactly once."""
+            nonlocal released
+            if released or start is None:
+                return
+            released = True
+            await send(start)
+
+        async def capture(message: Message) -> None:
+            nonlocal start, released, streaming
+
+            if streaming:
+                await send(message)
+                return
+
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers") or [])
+                if int(message.get("status", 0)) != 200:
+                    streaming = True
+                    await send(message)
+                    return
+                if _response_header(headers, "etag") is not None:
+                    # An explicit route-level validator is authoritative.
+                    streaming = True
+                    await send(message)
+                    return
+                declared = _response_header(headers, "content-length")
+                if declared is not None:
+                    try:
+                        too_large = int(declared) > self.max_body_bytes
+                    except ValueError:
+                        too_large = False
+                    if too_large:
+                        logger.debug(
+                            "ETag skipped for %s: declared body exceeds %d bytes",
+                            routed_path(scope),
+                            self.max_body_bytes,
+                        )
+                        streaming = True
+                        await send(message)
+                        return
+                message["headers"] = headers
+                start = message
+                return
+
+            if message["type"] != "http.response.body":
+                # Unexpected message (e.g. trailers): stop rewriting and let it
+                # through after the head that is already held.
+                streaming = True
+                await send_start()
+                await send(message)
+                return
+
+            chunk = message.get("body", b"")
+            if start is None:
+                # A body before the response head violates ASGI; do not try to
+                # rewrite it (and never hold bytes that have no head to pair
+                # with). Pass it through as-is.
+                streaming = True
+                await send(message)
+                return
+            if len(buffered) + len(chunk) > self.max_body_bytes:
+                logger.debug(
+                    "ETag skipped for %s: body exceeds %d bytes",
+                    routed_path(scope),
+                    self.max_body_bytes,
+                )
+                streaming = True
+                await send_start()
+                if buffered:
+                    await send(
+                        {
+                            "type": "http.response.body",
+                            "body": bytes(buffered),
+                            "more_body": True,
+                        }
+                    )
+                    buffered.clear()
+                await send(message)
+                return
+
+            buffered.extend(chunk)
+            if message.get("more_body", False):
+                return
+
+            body = bytes(buffered)
+            etag = make_strong_etag(body)
+            headers = list(start.get("headers") or [])
+            _set_response_header(headers, "ETag", etag)
+            if if_none_match_matches(if_none_match, etag):
+                # A 304 carries no representation: drop the body metadata but
+                # keep ETag so the client can refresh its stored validator.
+                _remove_response_header(headers, "Content-Length")
+                _remove_response_header(headers, "Content-Type")
+                _remove_response_header(headers, "Transfer-Encoding")
+                start["headers"] = headers
+                start["status"] = 304
+                released = True
+                await send(start)
+                await send(
+                    {"type": "http.response.body", "body": b"", "more_body": False}
+                )
+                return
+            start["headers"] = headers
+            released = True
+            await send(start)
+            await send({"type": "http.response.body", "body": body, "more_body": False})
+
+        completed = False
+        try:
+            await self.app(scope, receive, capture)
+            completed = True
+        finally:
+            if completed and not streaming and not released and start is not None:
+                # The downstream app ended without a body message; terminate
+                # the response so the connection cannot hang.
+                await send(start)
+                await send(
+                    {"type": "http.response.body", "body": b"", "more_body": False}
+                )
+
+
 class SecurityHeadersMiddleware:
     """
     Add defence-in-depth response headers to API and download responses.
@@ -1152,6 +1393,8 @@ __all__ = [
     "DEFAULT_RATE_LIMIT_WINDOW",
     "DOWNLOADS_CSP",
     "DOWNLOADS_PREFIX",
+    "ETAG_ENDPOINTS",
+    "ETAG_MAX_BODY_BYTES",
     "MAX_REQUEST_ID_LENGTH",
     "ORIGIN_ERROR_DETAIL",
     "RATE_LIMIT_EXEMPT_PATHS",
@@ -1161,6 +1404,7 @@ __all__ = [
     "SLOW_REQUEST_SECONDS",
     "BodySizeLimitMiddleware",
     "CacheControlMiddleware",
+    "ConditionalGetMiddleware",
     "DownloadsAuthMiddleware",
     "OriginCheckMiddleware",
     "RateLimitMiddleware",

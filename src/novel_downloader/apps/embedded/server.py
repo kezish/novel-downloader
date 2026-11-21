@@ -44,6 +44,13 @@ Contract parity with the REST API
   the stdlib server does not implement chunked request bodies and answers
   ``501`` instead.
 * ``HEAD`` is answered like ``GET`` (headers, no body) so probes work.
+* The reference endpoints (``GET /sites``, ``/history``, ``/music/platforms``)
+  send the same strong ``ETag`` as REST and answer a matching
+  ``If-None-Match`` with ``304`` (no body), so a polling client revalidates
+  without transferring the payload. They also carry the REST
+  ``Cache-Control: private, max-age=60``; the rest of the REST cache policy
+  is still not implemented here (native clients do not sit behind an HTTP
+  cache). Live and credential-bearing routes never receive a validator.
 
 Authentication
 --------------
@@ -96,6 +103,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse, urlsplit
+
+from novel_downloader.apps.common.conditional_get import (
+    ETAG_ENDPOINTS,
+    ETAG_MAX_BODY_BYTES,
+    if_none_match_matches,
+    make_strong_etag,
+)
 
 __all__ = ["start_server", "stop_server"]
 
@@ -241,6 +255,11 @@ _SECURITY_HEADERS = (
 #: ``api.middleware.DOWNLOADS_CSP``): an exported HTML/SVG file must not run
 #: script on the engine's own origin.
 _DOWNLOADS_CSP = "sandbox; default-src 'none'"
+
+#: ``Cache-Control`` for the reference endpoints that also carry an ``ETag``
+#: (mirrors ``api.middleware.CACHE_CONTROL_PRIVATE``). Only those endpoints
+#: opt in; the rest of the REST cache policy is still not implemented here.
+_CACHE_CONTROL_PRIVATE = "private, max-age=60"
 
 #: Environment variable carrying the per-process bearer token.
 #:
@@ -3204,13 +3223,40 @@ class _Handler(BaseHTTPRequestHandler):
         payload: Any,
         status: int = 200,
         extra_headers: dict[str, str] | None = None,
+        *,
+        cache_control: str | None = None,
+        enable_etag: bool = False,
     ) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        etag: str | None = None
+        if (
+            enable_etag
+            and status == 200
+            and len(data) <= ETAG_MAX_BODY_BYTES
+            and (extra_headers is None or "ETag" not in extra_headers)
+        ):
+            etag = make_strong_etag(data)
+        if etag is not None and if_none_match_matches(
+            self.headers.get("If-None-Match"), etag
+        ):
+            # A 304 has no message body and therefore no Content-Type or
+            # Content-Length; ETag, Cache-Control, X-Request-ID and the
+            # security headers (end_headers) are still sent.
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            if cache_control:
+                self.send_header("Cache-Control", cache_control)
+            self.end_headers()
+            return
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         for name, value in (extra_headers or {}).items():
             self.send_header(name, value)
+        if cache_control:
+            self.send_header("Cache-Control", cache_control)
+        if etag is not None:
+            self.send_header("ETag", etag)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(data)
@@ -3447,9 +3493,17 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._drain_body(path)
                 body = {}
+            # Same conditional-GET policy as the REST transport: a plain GET
+            # on a reference endpoint gets a strong ETag (and the matching
+            # private Cache-Control); HEAD and live/sensitive routes do not.
+            reference = (
+                self.command == "GET" and (path.rstrip("/") or "/") in ETAG_ENDPOINTS
+            )
             self._send_json(
                 handler(body, params, query),
                 _SUCCESS_STATUS.get(handler, 200),
+                cache_control=_CACHE_CONTROL_PRIVATE if reference else None,
+                enable_etag=reference,
             )
             return
 

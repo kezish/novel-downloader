@@ -59,6 +59,11 @@ Additional hardening
   endpoints (``/sites``, ``/history``, ``/music/platforms``), ``no-store``
   for live task data and for every error response, and
   ``public, max-age=3600`` for the write-once exported files.
+* The same reference endpoints carry a strong ``ETag`` and answer a matching
+  ``If-None-Match`` with ``304 Not Modified`` and no body
+  (:class:`novel_downloader.apps.api.middleware.ConditionalGetMiddleware`),
+  so a polling client revalidates without transferring the payload. Live and
+  credential-bearing endpoints never receive a validator.
 * API and download responses carry ``X-Content-Type-Options: nosniff`` and
   ``Referrer-Policy: no-referrer``; ``/downloads`` additionally gets a
   sandboxing ``Content-Security-Policy`` so a malicious exported HTML file
@@ -93,6 +98,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from novel_downloader import __version__
+from novel_downloader.apps.common.conditional_get import ETAG_ENDPOINTS
 from novel_downloader.apps.core.task_manager import manager
 from novel_downloader.infra.config import get_config_value
 
@@ -107,6 +113,7 @@ from .middleware import (
     REQUEST_ID_HEADER,
     BodySizeLimitMiddleware,
     CacheControlMiddleware,
+    ConditionalGetMiddleware,
     DownloadsAuthMiddleware,
     OriginCheckMiddleware,
     RateLimitMiddleware,
@@ -181,6 +188,32 @@ REQUEST_ID_RESPONSE_DESCRIPTION: str = (
 #: are not duplicated once per route in the generated document.
 _REQUEST_ID_PARAMETER_REF = "#/components/parameters/RequestId"
 _REQUEST_ID_RESPONSE_REF = "#/components/headers/RequestId"
+
+#: OpenAPI description of the ``If-None-Match`` request header, declared only
+#: on the conditional-GET endpoints.
+IF_NONE_MATCH_PARAMETER_DESCRIPTION: str = (
+    "Optional entity tag previously returned in 'ETag'. When it matches the "
+    "current representation the server answers '304 Not Modified' with no "
+    "body; otherwise the full '200' response is sent. A comma-separated list "
+    "matches when any member does, and '*' matches any current "
+    "representation. Comparison is the RFC 9110 weak comparison, so "
+    'W/"..." matches the strong tag too. Only the cacheable reference '
+    "endpoints accept this header; other routes ignore it."
+)
+
+#: OpenAPI description of the strong ``ETag`` response header.
+ETAG_RESPONSE_DESCRIPTION: str = (
+    "Strong entity tag of the exact response body: the first 16 bytes of its "
+    "SHA-256 digest, hex-encoded and quoted. Send it back in 'If-None-Match' "
+    "to revalidate. Omitted when the body exceeds 512 KiB, because buffering "
+    "and hashing such a response costs more than the bandwidth saved. Not "
+    "sent on live or credential-bearing endpoints."
+)
+
+#: Refs for the conditional-request header and validator, declared once in
+#: ``components`` and referenced from the eligible operations.
+_IF_NONE_MATCH_PARAMETER_REF = "#/components/parameters/IfNoneMatch"
+_ETAG_RESPONSE_REF = "#/components/headers/ETag"
 
 #: Path-item keys that hold an operation (as opposed to ``parameters``,
 #: ``servers`` or ``summary``).
@@ -403,6 +436,71 @@ def _documents_request_id_parameter(parameters: list[Any]) -> bool:
     return False
 
 
+def _install_conditional_get_metadata(schema: dict[str, Any]) -> None:
+    """
+    Document ``ETag`` / ``If-None-Match`` / ``304`` on the eligible routes.
+
+    The middleware adds the validator without any per-route declaration, so
+    the contract would otherwise be invisible to generated clients. Only the
+    paths in :data:`ETAG_ENDPOINTS` are touched: their ``200`` response gets
+    the ``ETag`` header, a ``304`` response is declared with the same header
+    and the correlation id, and the optional ``If-None-Match`` request header
+    is added. The 304 is inserted before the generic response pass so the
+    common ``X-Request-ID`` header is stamped on it like on every other
+    response.
+    """
+    components = schema.setdefault("components", {})
+    components.setdefault("parameters", {}).setdefault(
+        "IfNoneMatch",
+        {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": False,
+            "description": IF_NONE_MATCH_PARAMETER_DESCRIPTION,
+            "schema": {"type": "string"},
+        },
+    )
+    components.setdefault("headers", {}).setdefault(
+        "ETag",
+        {
+            "description": ETAG_RESPONSE_DESCRIPTION,
+            "schema": {"type": "string"},
+        },
+    )
+
+    for path in sorted(ETAG_ENDPOINTS):
+        path_item = schema.get("paths", {}).get(path)
+        if not isinstance(path_item, dict):
+            continue
+        operation = path_item.get("get")
+        if not isinstance(operation, dict):
+            continue
+        responses = operation.setdefault("responses", {})
+        success = responses.get("200")
+        if isinstance(success, dict):
+            headers = success.setdefault("headers", {})
+            headers["ETag"] = {"$ref": _ETAG_RESPONSE_REF}
+        responses["304"] = {
+            "description": (
+                "Not Modified: the representation still matches the "
+                "'If-None-Match' validator. The response has no body; 'ETag', "
+                "'Cache-Control', 'X-Request-ID' and the security headers are "
+                "still present."
+            ),
+            "headers": {
+                "ETag": {"$ref": _ETAG_RESPONSE_REF},
+                REQUEST_ID_HEADER: {"$ref": _REQUEST_ID_RESPONSE_REF},
+            },
+        }
+        parameters = operation.setdefault("parameters", [])
+        if not any(
+            isinstance(parameter, dict)
+            and parameter.get("$ref") == _IF_NONE_MATCH_PARAMETER_REF
+            for parameter in parameters
+        ):
+            parameters.append({"$ref": _IF_NONE_MATCH_PARAMETER_REF})
+
+
 def _install_openapi_metadata(application: FastAPI) -> None:
     """
     Augment the generated document with cross-cutting API metadata.
@@ -411,9 +509,11 @@ def _install_openapi_metadata(application: FastAPI) -> None:
     that actually sits behind ``require_token`` (public operations get an
     explicit empty list so they never inherit a document-wide requirement),
     documents the optional ``X-Request-ID`` request header and its echoed
-    response header on every operation, and removes the ``429`` response from
-    paths the rate limiter exempts. The schema is otherwise produced from the
-    routes, so it stays in sync with the router automatically.
+    response header on every operation, declares the conditional-request
+    contract (``If-None-Match`` / ``ETag`` / ``304``) on the cacheable
+    reference endpoints, and removes the ``429`` response from paths the rate
+    limiter exempts. The schema is otherwise produced from the routes, so it
+    stays in sync with the router automatically.
 
     The header parameter deliberately has no ``pattern`` or ``maxLength``:
     unsafe values are replaced by a generated id rather than rejected, so a
@@ -451,6 +551,10 @@ def _install_openapi_metadata(application: FastAPI) -> None:
                 "schema": {"type": "string"},
             },
         )
+
+        # Declared before the generic response pass so the new 304 also gets
+        # the X-Request-ID header like every other documented response.
+        _install_conditional_get_metadata(schema)
 
         for path, path_item in schema.get("paths", {}).items():
             if not isinstance(path_item, dict):
@@ -712,6 +816,12 @@ def create_app(
             window=rate_limit_window,
             max_keys=rate_limit_max_keys,
         )
+
+    # Conditional GET sits inside the Cache-Control layer (added below), so a
+    # 304 it produces is stamped with the endpoint's ``private, max-age=60``
+    # rule instead of ``no-store``; the security-header and request-id layers
+    # are further out and stamp it exactly as they would a 200.
+    application.add_middleware(ConditionalGetMiddleware)
 
     # Cache policy sits *outside* the auth and body-limit layers so their
     # direct 401/413 responses carry the same Cache-Control as every other
