@@ -28,6 +28,7 @@ import fnmatch
 import importlib.util
 import io
 import json
+import os
 import re
 import shutil
 import ssl
@@ -3583,6 +3584,44 @@ class TestPushApiParsing:
 
     def test_unrelated_remote_history_has_no_base(self, push_api: Any) -> None:
         assert push_api.find_base([("local", "tree-a")], "remote", "tree-b") is None
+
+    def test_tree_paths_are_raw_utf8_not_c_quoted(
+        self, push_api: Any, tmp_path: Path
+    ) -> None:
+        """``ls-tree`` without ``-z`` C-quotes non-ASCII names into a literal path.
+
+        A replay built from the quoted form created a file whose name contained
+        the surrounding quotes and octal escapes, so the real name disappeared
+        from the remote tree. ``-z`` keeps the bytes as-is.
+        """
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        name = ".trae/documents/UI重写为Claude风格实施计划.md"
+        target = repo / name
+        target.parent.mkdir(parents=True)
+        target.write_text("body", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.com",
+        }
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True, env=env)
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        files = push_api.read_commit_tree(repo, head)
+
+        assert [entry.path for entry in files] == [name]
+        assert '"' not in files[0].path and "\\" not in files[0].path
 
 
 class TestPushApiPlanning:
