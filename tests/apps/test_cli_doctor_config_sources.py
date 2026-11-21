@@ -95,7 +95,8 @@ def test_doctor_collect_checks_isolates_a_crashing_check(
         by_key
     )
     assert "search_cache" in by_key
-    assert len(checks) == 15
+    assert "storage" in by_key
+    assert len(checks) == 16
 
 
 def test_doctor_treats_a_non_check_return_value_as_a_failure() -> None:

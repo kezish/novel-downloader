@@ -43,6 +43,7 @@ import os
 import platform
 import re
 import socket
+import sqlite3
 import stat
 import sys
 import tempfile
@@ -60,10 +61,14 @@ from novel_downloader.apps.constants import DOWNLOAD_SUPPORT_SITES
 from novel_downloader.infra.config import ConfigAdapter, load_config, validate_config
 from novel_downloader.infra.i18n import t
 from novel_downloader.infra.paths import app_home
+from novel_downloader.infra.persistence.chapter_storage import (
+    SCHEMA_VERSION,
+    inspect_wal_damage,
+)
 from novel_downloader.plugins import registrar
 
 from .base import EXIT_FAILURE, EXIT_USAGE, Command, fail
-from .storage import disk_free, format_size, scan_tree
+from .storage import _find_chapter_databases, disk_free, format_size, scan_tree
 
 if TYPE_CHECKING:
     from novel_downloader.plugins.search_cache import SearchCache
@@ -121,6 +126,14 @@ MAX_DETAIL_ITEMS = 3
 #: Volume free space (on the output directory's volume) below which the
 #: disk-space check warns, in bytes (512 MiB).
 LOW_DISK_FREE_BYTES = 512 * 1024 * 1024
+
+#: How many chapter databases the storage check inspects.  A library whose
+#: files are all at most :data:`STORAGE_SMALL_DB_BYTES` is inspected in full;
+#: otherwise this bounds the evenly spread sample.
+STORAGE_SAMPLE_LIMIT = 3
+
+#: A database at or below this size is cheap enough to inspect in full.
+STORAGE_SMALL_DB_BYTES = 1024 * 1024
 
 #: Default age (in days) after which ``--fix`` removes ``.tmp``/``.part`` files.
 DEFAULT_FIX_MAX_AGE_DAYS = 7
@@ -1123,6 +1136,303 @@ def _check_cache_dir() -> Check:
     )
 
 
+def _raw_data_dir() -> Path:
+    """Resolve the configured raw-data directory (``./raw_data`` default)."""
+    config = _load_config_for_checks()
+    data = config if config is not None else {}
+    return ConfigAdapter(data).get_raw_data_dir()
+
+
+def _storage_dir_writable(path: Path) -> bool:
+    """Return whether ``path`` accepts writes, without creating anything."""
+    try:
+        return path.is_dir() and os.access(path, os.W_OK)
+    except OSError:
+        return False
+
+
+def _storage_file_writable(path: Path) -> bool:
+    """Return whether the database file itself accepts writes."""
+    try:
+        return os.access(path, os.W_OK)
+    except OSError:
+        return False
+
+
+def _file_size(path: Path) -> int:
+    """Return the size of ``path`` in bytes, or ``0`` when it cannot be read."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _storage_sample(
+    databases: Sequence[Path],
+    *,
+    limit: int = STORAGE_SAMPLE_LIMIT,
+    small_bytes: int = STORAGE_SMALL_DB_BYTES,
+) -> list[Path]:
+    """Pick the databases to inspect, preferring a small library.
+
+    Every database is inspected when the library fits the budget.  A library
+    whose files are all small is also inspected in full: the work is bounded by
+    the small-file budget, and checking every one of them catches a damaged
+    book instead of an unlucky sample.  The remaining case takes at most
+    ``limit`` databases, evenly spread so one damaged corner is not
+    systematically missed.  Only file sizes are read.
+    """
+    if limit <= 0 or not databases:
+        return []
+    if len(databases) <= limit:
+        return list(databases)
+    if all(_file_size(database) <= small_bytes for database in databases):
+        return list(databases)
+    step = len(databases) / limit
+    indexes = sorted({round(index * step) for index in range(limit)})
+    return [databases[index] for index in indexes]
+
+
+@dataclass(frozen=True)
+class _StorageProbe:
+    """Read-only result for one sampled chapter database.
+
+    ``problem`` is a stable category (``integrity_failed``,
+    ``schema_unsupported``, ...) and makes the check fail; ``skipped`` records
+    why the file was not opened at all (a WAL or hot journal would need a
+    sidecar) and never counts as corruption.
+    """
+
+    path: Path
+    problem: str = ""
+    reason: str = ""
+    skipped: str = ""
+    schema_version: int | None = None
+
+
+def _inspect_storage_database(path: Path) -> _StorageProbe:
+    """Inspect one database through an ``immutable=1`` read-only connection.
+
+    ``immutable=1`` is deliberate: ``mode=ro`` alone still creates ``-shm`` (and
+    may recreate ``-wal``) for a database whose header records WAL mode, which
+    would make a diagnostic command modify the data it inspects.  Immutable
+    mode never creates sidecars, but it cannot see committed frames that only
+    live in a WAL, so a database with a WAL sidecar is skipped and reported
+    instead of being opened.
+    """
+    path = Path(path)
+    wal = Path(f"{path}-wal")
+    if wal.exists():
+        damage = inspect_wal_damage(path)
+        if damage is not None:
+            return _StorageProbe(
+                path,
+                problem="wal_damaged",
+                reason=t("damaged write-ahead log: {problem}").format(problem=damage),
+            )
+        return _StorageProbe(
+            path,
+            skipped="wal_pending",
+            reason=t(
+                "write-ahead log present; not opened (would create a -shm sidecar)"
+            ),
+        )
+
+    journal = Path(f"{path}-journal")
+    if journal.exists() and _file_size(journal) > 0:
+        return _StorageProbe(
+            path,
+            skipped="hot_journal",
+            reason=t("hot journal present; not opened read-only"),
+        )
+
+    try:
+        uri = f"{path.resolve().as_uri()}?mode=ro&immutable=1"
+        conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+        try:
+            conn.execute("PRAGMA query_only = ON")
+            rows = [
+                str(row[0]) for row in conn.execute("PRAGMA quick_check").fetchall()
+            ]
+            version_row = conn.execute("PRAGMA user_version").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        text = (str(exc) or type(exc).__name__)[:_MAX_FAILURE_TEXT]
+        lowered = text.lower()
+        if (
+            "not a database" in lowered
+            or "not an sqlite" in lowered
+            or "malformed" in lowered
+            or "corrupt" in lowered
+        ):
+            category = "integrity_failed"
+        else:
+            category = "database_error"
+        return _StorageProbe(path, problem=category, reason=text)
+    except OSError as exc:
+        text = (str(exc) or type(exc).__name__)[:_MAX_FAILURE_TEXT]
+        return _StorageProbe(path, problem="io_error", reason=text)
+
+    if not rows or any(value.lower() != "ok" for value in rows):
+        detail = "; ".join(rows[:2]) or t("unknown")
+        return _StorageProbe(
+            path,
+            problem="integrity_failed",
+            reason=t("quick_check failed: {detail}").format(detail=detail),
+        )
+
+    version = int(version_row[0]) if version_row is not None else 0
+    if version > SCHEMA_VERSION:
+        return _StorageProbe(
+            path,
+            problem="schema_unsupported",
+            reason=t(
+                "schema version {version}, newer than this build supports ({supported})"
+            ).format(version=version, supported=SCHEMA_VERSION),
+            schema_version=version,
+        )
+    return _StorageProbe(path, schema_version=version)
+
+
+def _check_storage(
+    root: Path | None = None,
+    *,
+    sample_limit: int = STORAGE_SAMPLE_LIMIT,
+    small_bytes: int = STORAGE_SMALL_DB_BYTES,
+) -> Check:
+    """Report the health of the chapter databases under ``raw_data``.
+
+    Advisory and strictly read-only: directory and file sizes are stat'd,
+    sampled databases are opened with ``immutable=1`` only, and no ``-wal`` /
+    ``-shm`` sidecar is created.  A database that needs one (a WAL or hot
+    journal is present) is skipped and reported instead of being opened with
+    write semantics.  The report contains paths and counts only; chapter
+    titles and contents are never read or printed.
+    """
+    path = _raw_data_dir() if root is None else Path(root)
+    exists = path.is_dir()
+    path_taken = path.exists() and not exists
+    writable = _storage_dir_writable(path) if exists else False
+    free = disk_free(path)
+
+    databases: list[Path] = []
+    if exists:
+        try:
+            databases = _find_chapter_databases(path)
+        except OSError:
+            databases = []
+
+    total_bytes = sum(_file_size(database) for database in databases)
+    sample = _storage_sample(databases, limit=sample_limit, small_bytes=small_bytes)
+    probes = [_inspect_storage_database(database) for database in sample]
+    problems = [probe for probe in probes if probe.problem]
+    skipped = [probe for probe in probes if probe.skipped]
+    corrupt = sum(1 for probe in problems if probe.problem != "schema_unsupported")
+    unsupported = sum(1 for probe in problems if probe.problem == "schema_unsupported")
+    wal_read_only = sum(
+        1
+        for database in databases
+        if Path(f"{database}-wal").exists() and not _storage_file_writable(database)
+    )
+    low_disk = free is not None and free < LOW_DISK_FREE_BYTES
+
+    if not exists:
+        detail = (
+            t("path exists but is not a directory")
+            if path_taken
+            else t("not created yet")
+        )
+    else:
+        detail = t("{count} database(s), {size}").format(
+            count=len(databases), size=format_size(total_bytes)
+        )
+        if problems:
+            first = problems[0]
+            detail += t("; {count} problem(s), first: {path} ({category})").format(
+                count=len(problems),
+                path=first.path,
+                category=first.problem,
+            )
+        if skipped:
+            detail += t("; {count} not opened").format(count=len(skipped))
+        if not writable:
+            detail += t("; not writable")
+        if wal_read_only:
+            detail += t("; {count} with WAL but read-only").format(count=wal_read_only)
+        if low_disk:
+            detail += t("; only {free} free").format(free=format_size(free or 0))
+
+    if not exists and not path_taken:
+        # A fresh installation has no raw_data yet; that is not a fault.
+        ok = True
+    else:
+        ok = writable and not problems and not wal_read_only and not low_disk
+    suggestion = ""
+    if path_taken:
+        suggestion = t("Move the file away or set raw_data_dir to a directory path.")
+    elif not exists:
+        suggestion = t("The directory is created by the first download.")
+    elif not writable:
+        suggestion = t(
+            "Check the permissions of the raw data directory or change raw_data_dir."
+        )
+    elif problems:
+        suggestion = t(
+            "Run 'novel-cli storage verify' and restore the affected database "
+            "from a backup."
+        )
+    elif wal_read_only:
+        suggestion = t(
+            "Restore write permission on the database so its write-ahead log "
+            "can be checkpointed."
+        )
+    elif low_disk:
+        suggestion = t(
+            "Free up disk space or move the raw data directory to another volume."
+        )
+
+    return Check(
+        t("Chapter storage"),
+        ok,
+        detail,
+        suggestion,
+        fatal=False,
+        key="storage",
+        data={
+            "path": str(path),
+            "exists": exists,
+            "writable": writable,
+            "databases": len(databases),
+            "bytes": total_bytes,
+            "sampled": len(sample),
+            "checked": len(probes) - len(skipped),
+            "corrupt": corrupt,
+            "schema_unsupported": unsupported,
+            "skipped": len(skipped),
+            "wal_read_only": wal_read_only,
+            "free_bytes": free,
+            "low_free_bytes": LOW_DISK_FREE_BYTES,
+            "problems": [
+                {
+                    "path": str(probe.path),
+                    "category": probe.problem,
+                    "reason": probe.reason,
+                }
+                for probe in problems
+            ],
+            "not_opened": [
+                {
+                    "path": str(probe.path),
+                    "reason": probe.skipped,
+                    "detail": probe.reason,
+                }
+                for probe in skipped
+            ],
+        },
+    )
+
+
 def _search_cache() -> SearchCache:
     """Return the process-wide search cache (imported lazily, no I/O)."""
     from novel_downloader.plugins.search import _CACHE
@@ -1420,6 +1730,7 @@ def collect_checks(
         ),
         ("disk_space", t("Disk space"), _check_disk_space),
         ("cache", t("Cache directory"), _check_cache_dir),
+        ("storage", t("Chapter storage"), _check_storage),
         ("search_cache", t("Search cache"), _check_search_cache),
         ("sites", t("Sites"), _check_sites),
         ("site_plugins", t("Site plugins"), _check_site_plugins),
