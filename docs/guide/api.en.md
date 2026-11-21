@@ -937,6 +937,11 @@ endpoint unchanged; `search_id` should be sent back as well (see below).
   an empty page, so they return `false`. A client seeing `false` should stop
   its "load more" control instead of requesting empty pages forever. Aggregate
   searches also return `false`.
+- Platforms skipped by the failure breaker still appear in `platforms[]` with
+  `ok=false`, `count=0` and the fixed `error` value `SKIPPED_BREAKER_ERROR`.
+  Like a real failure they do not affect the other platforms' rows, but they are
+  not counted as a new failure and do not extend the breaker; a client can show
+  "skipped" instead of "returned zero rows".
 
 `POST /api/v1/music/download`:
 

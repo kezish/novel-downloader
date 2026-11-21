@@ -837,6 +837,9 @@ curl -s -X POST "$BASE/api/v1/login/requests/<req_id>" \
 - `supports_offset` 说明该平台是否真的支持分页。musicdl 驱动的平台没有分页概念，
   非零 `offset` 会得到空页，因此返回 `false`；客户端看到 `false` 应停止
   「加载更多」，不要继续请求空页。聚合搜索同样返回 `false`。
+- 被失败熔断跳过的平台也会出现在 `platforms[]` 中：`ok=false`、`count=0`，
+  `error` 为固定值 `SKIPPED_BREAKER_ERROR`。它与真正失败的平台一样不影响其他平台的结果，
+  但不计入本次失败、不延长熔断时间；客户端可据此显示「已跳过」而非「返回 0 条」。
 
 `POST /api/v1/music/download`：
 

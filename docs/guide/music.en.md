@@ -72,8 +72,11 @@ Aggregate search rules (implemented in `apps/music/aggregate.py`):
 Failures and circuit breaking:
 
 * A platform that raises or exceeds the budget is recorded as failed and skipped by aggregate search for 10 minutes.
+* A skipped platform still appears in `platforms[]` with `ok=false` and the fixed `SKIPPED_BREAKER_ERROR` reason, so "skipped" is distinguishable from "returned zero rows"; the skip is not counted as a new failure and does not extend the breaker.
 * A platform that twice takes over 2 seconds and returns nothing is treated as "slow and empty" and skipped for 5 minutes.
-* This state is written to `search_stats.json` in the music data directory and survives a restart.
+* One successful answer (including an empty one) clears the failure ban; when the window expires, the slow-and-empty streak is cleared too.
+* This state is written to `search_stats.json` in the music data directory and survives a restart; a corrupt or unwritable file degrades to in-memory state instead of failing the search.
+* `music health` probes update the breaker: a successful probe clears the ban, a failed one records a 10-minute failure (pass `record_stats=False` for a purely read-only probe).
 * **Explicitly selecting a platform bypasses the breaker**, which makes manual retries possible.
 * If every platform fails, the CLI exits non-zero; zero results from platforms that answered normally is a successful empty search. For diagnosis see [Troubleshooting - aggregate music search](./troubleshooting.en.md#music-aggregate-search).
 
