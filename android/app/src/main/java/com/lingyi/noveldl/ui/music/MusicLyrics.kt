@@ -55,8 +55,16 @@ object MusicLyrics {
      * check is always inside the provider range, and anything else is rejected
      * before `FileProvider.getUriForFile` is reached.
      */
-    fun providerRoot(context: Context): String = File(
-        context.applicationContext.filesDir,
+    fun providerRoot(context: Context): String =
+        providerRoot(context.applicationContext.filesDir)
+
+    /**
+     * Same root derived from an explicit `filesDir`. Split out so the mapping
+     * from the private files directory to the provider range can be pinned by
+     * plain JVM tests without an Android [Context].
+     */
+    fun providerRoot(filesDir: File): String = File(
+        filesDir,
         "${EmbeddedEngine.HOME_DIRECTORY}/$EMBEDDED_MUSIC_SUBDIRECTORY",
     ).absolutePath
 
@@ -153,6 +161,63 @@ object MusicLyrics {
             !result.lyricPath.isNullOrBlank() ||
                 result.lyricPaths.any { it.path.isNotBlank() }
         }
+
+    /**
+     * Label slot of a rendered lyric button. Stable identifiers, not display
+     * copy: the UI maps each one to a localized string.
+     */
+    enum class Label {
+        /** Historical single-button caption ("Lyrics"/"歌词"). */
+        Generic,
+
+        /** Slot caption when both files are shown ("Original lyrics"). */
+        Original,
+
+        /** Translation slot ("Translated lyrics"). */
+        Translation,
+    }
+
+    /** One rendered lyric button: the verified [path] and its [label] slot. */
+    data class Button(val path: String, val lang: String, val label: Label)
+
+    /**
+     * Buttons to render for [files], after re-checking every path against
+     * [providerRoot].
+     *
+     * The screen only receives paths [PrivateMusicLyricLookup] verified, but
+     * this is the last line before a button: a wire-supplied or stale entry
+     * that is not a `.lrc` inside the provider range is dropped instead of
+     * becoming a button that can only fail once tapped.
+     *
+     * Labels preserve the historical layout: a lone file uses the generic
+     * caption for the original, the translation caption when it is the
+     * translation, and the generic caption for an unknown slot. With two or
+     * more files each button names its slot.
+     */
+    fun buttons(files: List<MusicLyricFile>, providerRoot: String): List<Button> {
+        val trusted = files.mapNotNull { entry ->
+            val path = entry.path.trim()
+            if (path.isEmpty()) return@mapNotNull null
+            if (!path.endsWith(EXTENSION, ignoreCase = true)) return@mapNotNull null
+            if (!MusicLocalPaths.isInside(providerRoot, path)) return@mapNotNull null
+            MusicLyricFile(lang = entry.lang, path = path)
+        }
+        if (trusted.isEmpty()) return emptyList()
+        val single = trusted.size == 1
+        return trusted.map { entry ->
+            Button(
+                path = entry.path,
+                lang = entry.lang,
+                label = labelFor(entry.lang, single),
+            )
+        }
+    }
+
+    private fun labelFor(lang: String, single: Boolean): Label = when {
+        lang == LANG_TRANSLATION -> Label.Translation
+        lang == LANG_ORIGINAL && !single -> Label.Original
+        else -> Label.Generic
+    }
 }
 
 /**
@@ -189,11 +254,35 @@ fun interface MusicLyricLookup {
  */
 class PrivateMusicLyricLookup(
     private val roots: List<String>,
-    private val exists: (String) -> Boolean = { File(it).isFile },
+    exists: ((String) -> Boolean)? = null,
+    /**
+     * Resolves the real path of [File.canonicalPath] so a symlink can be
+     * checked against the root it actually points at. Injectable for tests
+     * that must simulate a symlink on a platform that cannot create one.
+     */
+    private val canonicalPath: (String) -> String? = { path ->
+        runCatching { File(path).canonicalPath }.getOrNull()
+    },
 ) : MusicLyricLookup {
 
     constructor(context: Context) : this(listOf(MusicLyrics.providerRoot(context)))
 
+    /**
+     * Default probe: the entry must be a file and its canonical path must
+     * still live under [roots].
+     *
+     * The lexical check in [MusicLyrics.findAll] compares the path as written,
+     * so a symlink under the music directory pointing outside it would pass.
+     * `FileProvider` canonicalises before matching, so such a button could
+     * never be opened; rejecting it here keeps it from being shown at all.
+     */
+    private val exists: (String) -> Boolean = exists ?: { path ->
+        val file = File(path)
+        val canonical = canonicalPath(path)
+        file.isFile && canonical != null &&
+            roots.any { MusicLocalPaths.isInside(it, canonical) }
+    }
+
     override fun find(audioPath: String): List<MusicLyricFile> =
-        MusicLyrics.findAll(audioPath, roots, exists)
+        MusicLyrics.findAll(audioPath, roots, this.exists)
 }

@@ -43,30 +43,55 @@ object MusicLyricOpener {
     /** Fallback MIME type understood by every text viewer. */
     const val MIME_PLAIN: String = "text/plain"
 
-    private val MIME_TYPES = listOf(MIME_LYRIC, MIME_PLAIN)
+    /** MIME types in dispatch order; the first one a viewer handles wins. */
+    val MIME_TYPES: List<String> = listOf(MIME_LYRIC, MIME_PLAIN)
+
+    /**
+     * Flags of the view intent: a read grant for the one content URI plus
+     * [Intent.FLAG_ACTIVITY_NEW_TASK]. There is deliberately no write grant.
+     */
+    val VIEW_FLAGS: Int =
+        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
+
+    /** Authority of the app's [FileProvider] (`<applicationId>.fileprovider`). */
+    fun providerAuthority(packageName: String): String = "$packageName.fileprovider"
+
+    /**
+     * Whether [lyricPath] may be handed to the provider for [providerRoot]:
+     * a non-blank `.lrc` (suffix compared case-insensitively) inside the
+     * provider range declared in `res/xml/file_paths.xml`.
+     *
+     * Kept Android-free so the guard can be exercised without a device; the
+     * existence and FileProvider checks stay in [open].
+     */
+    fun isOpenableLyric(providerRoot: String, lyricPath: String): Boolean {
+        val path = lyricPath.trim()
+        return path.isNotEmpty() &&
+            path.endsWith(MusicLyrics.EXTENSION, ignoreCase = true) &&
+            MusicLocalPaths.isInside(providerRoot, path)
+    }
 
     fun open(context: Context, lyricPath: String): MusicLyricOpenResult {
-        val path = lyricPath.trim()
-        if (path.isEmpty()) return MusicLyricOpenResult.Missing
-        // The provider range also holds the audio files; only the `.lrc`
-        // sidecars this screen opens may ever be handed out.
-        if (!path.endsWith(MusicLyrics.EXTENSION, ignoreCase = true)) {
-            return MusicLyricOpenResult.Missing
-        }
         // Narrower than the app-wide sandbox roots: the check is exactly the
         // range file_paths.xml exposes, so passing it guarantees the
-        // getUriForFile below succeeds for an existing file.
-        if (!MusicLocalPaths.isInside(MusicLyrics.providerRoot(context), path)) {
+        // getUriForFile below succeeds for an existing file. The provider
+        // range also holds the audio files; only `.lrc` sidecars may be
+        // handed out.
+        if (!isOpenableLyric(MusicLyrics.providerRoot(context), lyricPath)) {
             return MusicLyricOpenResult.Missing
         }
-        val file = File(path)
+        val file = File(lyricPath.trim())
         if (!file.isFile) return MusicLyricOpenResult.Missing
 
         // getUriForFile throws when the file is outside file_paths.xml; a
         // lyric that cannot be exposed is indistinguishable from a missing
         // one for the user, and reporting "no app" would be wrong.
         val uri = runCatching {
-            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            FileProvider.getUriForFile(
+                context,
+                providerAuthority(context.packageName),
+                file,
+            )
         }.getOrNull() ?: return MusicLyricOpenResult.Missing
 
         MIME_TYPES.forEach { mime ->
@@ -75,8 +100,7 @@ object MusicLyricOpener {
                 // Some viewers only look at the clip data even though the URI
                 // is also the intent data.
                 clipData = ClipData.newRawUri(null, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(VIEW_FLAGS)
             }
             try {
                 context.startActivity(intent)

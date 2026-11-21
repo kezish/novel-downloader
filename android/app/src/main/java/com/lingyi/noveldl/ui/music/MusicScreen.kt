@@ -60,7 +60,6 @@ import com.lingyi.noveldl.data.ApiErrorCode
 import com.lingyi.noveldl.data.EmbeddedEngine
 import com.lingyi.noveldl.data.MusicHealthItem
 import com.lingyi.noveldl.data.MUSIC_ALL_PLATFORMS
-import com.lingyi.noveldl.data.MusicLyricFile
 import com.lingyi.noveldl.ui.apiErrorMessage
 import com.lingyi.noveldl.ui.progressFraction
 import kotlinx.coroutines.delay
@@ -94,6 +93,9 @@ fun MusicScreen(
     onMessage: (String) -> Unit,
 ) {
     val context = LocalContext.current
+    // The single directory the FileProvider exposes for lyrics; also the
+    // boundary [MusicLyrics.buttons] re-checks before a button is rendered.
+    val lyricRoot = remember(context) { MusicLyrics.providerRoot(context) }
     val jobState by jobModel.state.collectAsState()
     val search by searchModel.state.collectAsState()
     val exportState by exportModel.state.collectAsState()
@@ -523,9 +525,14 @@ fun MusicScreen(
             val checked = trackKey in search.selectedKeys
             // Verified by [MusicJobRunner]: absent until a finished download
             // really wrote lyrics next to the audio inside the app's private
-            // music directory. The list holds the original first and the
-            // `.zh.lrc` translation second when it exists.
-            val lyricFiles = jobState.lyricPaths[trackKey].orEmpty()
+            // music directory. Re-checked here as the last step before a
+            // button, so a stale or wire-supplied path never renders one.
+            // The list holds the original first and the `.zh.lrc` translation
+            // second when it exists.
+            val lyricButtons = MusicLyrics.buttons(
+                jobState.lyricPaths[trackKey].orEmpty(),
+                lyricRoot,
+            )
             Card(modifier = Modifier.fillMaxWidth()) {
                 Row(
                     // The whole card selects the track: a 24 dp checkbox alone
@@ -565,10 +572,10 @@ fun MusicScreen(
                             }
                             // Only present when a lyric really was saved: a
                             // stale path would make a button a silent no-op.
-                            if (lyricFiles.isNotEmpty()) {
+                            if (lyricButtons.isNotEmpty()) {
                                 MusicLyricButtons(
                                     trackName = track.name,
-                                    files = lyricFiles,
+                                    buttons = lyricButtons,
                                     onResult = { result ->
                                         when (result) {
                                             MusicLyricOpenResult.Missing -> onMessage(
@@ -628,7 +635,7 @@ fun MusicScreen(
 @Composable
 private fun MusicLyricButtons(
     trackName: String,
-    files: List<MusicLyricFile>,
+    buttons: List<MusicLyrics.Button>,
     onResult: (MusicLyricOpenResult) -> Unit,
 ) {
     val context = LocalContext.current
@@ -637,19 +644,14 @@ private fun MusicLyricButtons(
         onResult(MusicLyricOpener.open(context, path))
     }
 
-    if (files.size == 1) {
-        val entry = files.single()
-        val label = if (entry.lang == MusicLyrics.LANG_ORIGINAL) {
-            stringResource(R.string.music_lyrics)
-        } else {
-            lyricSlotLabel(entry.lang)
-        }
+    if (buttons.size == 1) {
+        val entry = buttons.single()
         val openLabel = stringResource(R.string.music_lyric_open_named, trackName)
         TextButton(
             onClick = { open(entry.path) },
             modifier = Modifier.semantics { contentDescription = openLabel },
         ) {
-            Text(label, style = MaterialTheme.typography.labelSmall)
+            Text(lyricLabel(entry.label), style = MaterialTheme.typography.labelSmall)
         }
         return
     }
@@ -658,8 +660,8 @@ private fun MusicLyricButtons(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
-        files.forEach { entry ->
-            val label = lyricSlotLabel(entry.lang)
+        buttons.forEach { entry ->
+            val label = lyricLabel(entry.label)
             val openLabel = stringResource(
                 R.string.music_lyric_open_slot_named,
                 label,
@@ -675,12 +677,12 @@ private fun MusicLyricButtons(
     }
 }
 
-/** Localized label for a stable lyric language slot. */
+/** Localized text for a lyric button's label slot. */
 @Composable
-private fun lyricSlotLabel(lang: String): String = when (lang) {
-    MusicLyrics.LANG_ORIGINAL -> stringResource(R.string.music_lyric_original)
-    MusicLyrics.LANG_TRANSLATION -> stringResource(R.string.music_lyric_translation)
-    else -> stringResource(R.string.music_lyrics)
+private fun lyricLabel(label: MusicLyrics.Label): String = when (label) {
+    MusicLyrics.Label.Generic -> stringResource(R.string.music_lyrics)
+    MusicLyrics.Label.Original -> stringResource(R.string.music_lyric_original)
+    MusicLyrics.Label.Translation -> stringResource(R.string.music_lyric_translation)
 }
 
 /**
