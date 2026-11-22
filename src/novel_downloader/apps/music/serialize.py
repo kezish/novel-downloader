@@ -21,6 +21,8 @@ from typing import Any
 __all__ = [
     "PUBLIC_TRACK_FIELDS",
     "REASON_MAX_CHARS",
+    "redact_credentials",
+    "redact_headers",
     "sanitize_reason",
     "strip_url_query",
     "track_dict",
@@ -108,9 +110,7 @@ def track_dict(track: object) -> dict[str, Any]:
 
     headers = _field(track, "http_headers", {}) or {}
     if isinstance(headers, Mapping):
-        payload["http_headers"] = {
-            _as_str(key): _as_str(value) for key, value in headers.items()
-        }
+        payload["http_headers"] = redact_headers(headers)
     else:
         payload["http_headers"] = {}
 
@@ -148,6 +148,105 @@ def _as_int(value: object) -> int:
 
 
 _URL_RE = re.compile(r"(?:https?|ftp)://[^\s'\"<>`]+", re.IGNORECASE)
+
+_REDACTED = "***"
+
+#: Cookies/credentials specific to the music platforms.  ``MUSIC_U`` is the
+#: NetEase login credential; the others are values the UI stores in
+#: ``platform_creds.json`` (Deezer ``arl``, QQ cookie jar, MOOV device id).
+#: The shared logger redactor knows their ``name=value`` form; this pattern
+#: additionally covers mapping reprs (``{'MUSIC_U': '...'}``) and the
+#: ``__csrf``/``MUSIC_A`` names used only by the NetEase client.
+_MUSIC_CREDENTIAL_RE = re.compile(
+    r"(?i)(?<![\w.\-])"
+    r"(?P<name>[\"']?(?:MUSIC_[AU]|__csrf|__remember_me|NMTID|arl|qm_keyst|"
+    r"qqmusic_key|p_skey|skey|MOOVUUID)[\"']?)"
+    r"(?P<sep>\s*[=:]\s*)"
+    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&)\]}\"']+)"
+)
+
+#: ``cookies={...}`` / ``default_download_cookies={'MUSIC_U': '...'}``.
+#: The jar is masked whole: its key names vary per platform and the exact
+#: names are not something a log reader needs.
+_COOKIE_MAP_RE = re.compile(
+    r"(?i)\b(?P<name>(?:[a-z0-9]+_)*cookies)"
+    r"\s*[:=]\s*\{[^{}\r\n]*\}"
+)
+
+#: Headers whose value *is* a credential, regardless of the platform.
+_SENSITIVE_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "api-key",
+    }
+)
+
+_SENSITIVE_HEADER_SUFFIX_RE = re.compile(
+    r"(?i)(?:^|[-_])(?:authorization|cookie|token|secret|password|"
+    r"api[-_]?key|signature)$"
+)
+
+
+def _redacted_cookie_map(match: re.Match[str]) -> str:
+    return f"{match.group('name')}={_REDACTED}"
+
+
+def _redacted_assignment(match: re.Match[str]) -> str:
+    return f"{match.group('name')}{match.group('sep')}{_REDACTED}"
+
+
+def redact_credentials(text: object) -> str:
+    """
+    Mask credentials in *text* using the shared logger rules plus the
+    music-specific cookie/mapping forms.
+
+    Safe to call on any value: it never raises.  The result keeps the shape
+    of the original message (platform name, HTTP status, host/path) so a
+    failure stays diagnosable.
+
+    :param text: Any value; non-strings are converted with ``str()``.
+    :return: The redacted text.
+    """
+    from novel_downloader.infra.logger import redact
+
+    value = _as_str(text)
+    value = _COOKIE_MAP_RE.sub(_redacted_cookie_map, value)
+    value = _MUSIC_CREDENTIAL_RE.sub(_redacted_assignment, value)
+    # Generic URL userinfo / Authorization / Bearer / query / name=value rules.
+    return redact(value)
+
+
+def _is_sensitive_header(name: str) -> bool:
+    lowered = name.strip().lower()
+    if lowered in _SENSITIVE_HEADER_NAMES:
+        return True
+    return bool(_SENSITIVE_HEADER_SUFFIX_RE.search(lowered))
+
+
+def redact_headers(headers: Mapping[Any, Any]) -> dict[str, str]:
+    """
+    Return a copy of *headers* with credential values replaced by ``***``.
+
+    ``Track.http_headers`` is part of the public wire format; some vendored
+    providers put their session ``Cookie`` or ``Authorization`` header there
+    for the downloader.  Those values are useful to the server-side download
+    but must never be echoed to a CLI/API client.
+
+    :param headers: Header-name -> value mapping (values are stringified).
+    :return: A new ``str -> str`` mapping in the original order.
+    """
+    out: dict[str, str] = {}
+    for key, value in headers.items():
+        name = _as_str(key)
+        if _is_sensitive_header(name):
+            out[name] = _REDACTED
+        else:
+            out[name] = redact_credentials(value)
+    return out
 
 
 def strip_url_query(text: str) -> str:
@@ -189,17 +288,19 @@ def sanitize_reason(text: object, *, limit: int = REASON_MAX_CHARS) -> str:
     Three transforms, applied in this order:
 
     1. drop URL query/fragment parts (they can carry signed tokens);
-    2. collapse every whitespace run (newlines, tabs, repeated spaces) into a
+    2. redact any remaining credentials (userinfo, headers, cookies, the
+       music-specific cookie names) with :func:`redact_credentials`;
+    3. collapse every whitespace run (newlines, tabs, repeated spaces) into a
        single space, so a multi-line provider message becomes one readable
        line instead of breaking table/row rendering in clients;
-    3. truncate to *limit* characters.
+    4. truncate to *limit* characters.
 
     Stripping happens before truncation on purpose: cutting a URL first could
     leave most of a token in the prefix.  The same rule is used for
     ``platforms[].error`` (search) and the health probe's ``error``, so every
     music error string crossing the wire shares one ceiling.
     """
-    value = strip_url_query(str(text or ""))
+    value = redact_credentials(strip_url_query(_as_str(text)))
     value = " ".join(value.split())
     if limit > 0 and len(value) > limit:
         value = value[:limit]

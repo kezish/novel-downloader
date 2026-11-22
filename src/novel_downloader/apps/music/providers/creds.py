@@ -44,6 +44,8 @@ def set(key, data):
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(all_, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         # 里面存着平台登录凭据（TIDAL token、站点 cookies），落盘前收紧到
         # 仅属主可读写——与 weapi.save_cookies / cookie_io.write_cookie_items
         # 保持一致（Windows 上 chmod 只能尽力而为，失败不影响保存）。

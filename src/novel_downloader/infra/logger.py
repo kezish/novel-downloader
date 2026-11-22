@@ -130,6 +130,18 @@ _SECRET_KEYS = (
     "secret",
     "session",
     "cookie",
+    # Music-platform login cookies: the generic words above do not know
+    # these names, so a bare ``MUSIC_U=...`` in a provider message would
+    # otherwise reach the log verbatim.
+    "music_u",
+    "music_a",
+    "__csrf",
+    "arl",
+    "qm_keyst",
+    "qqmusic_key",
+    "p_skey",
+    "skey",
+    "moovuuid",
     "sign",
     "token",
     "auth",

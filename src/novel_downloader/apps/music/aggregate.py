@@ -37,7 +37,7 @@ from typing import Any, cast
 
 from .providers import available, create
 from .providers.base import Track
-from .serialize import strip_url_query
+from .serialize import sanitize_reason
 
 logger = logging.getLogger(__name__)
 
@@ -1030,9 +1030,9 @@ def _short_error(exc: BaseException) -> str:
     except Exception:  # noqa: BLE001 - 自定义异常可能带坏掉的 __str__
         message = ""
     message = message or type(exc).__name__
-    # Strip signed query strings *before* truncating, or a partially cut URL
-    # could still leak most of a token.
-    return strip_url_query(message)[:200]
+    # Strip signed query strings *and* redact cookies/tokens before
+    # truncating: a partially cut URL or header value could still leak.
+    return sanitize_reason(message, limit=200)
 
 
 def _child_search(conn: Any, kwargs: dict[str, Any]) -> None:
@@ -1151,7 +1151,7 @@ def search_all_isolated(
     status, value = payload
     if status == "ok" and isinstance(value, AggregateResult):
         return value
-    message = strip_url_query(str(value or "搜索进程失败"))[:200]
+    message = sanitize_reason(value or "搜索进程失败", limit=200)
     return AggregateResult(
         platforms=[PlatformOutcome(key, False, error=message) for key in keys]
     )

@@ -24,6 +24,8 @@ from Crypto.Util.Padding import pad
 
 from novel_downloader.infra.i18n import t
 
+from .serialize import sanitize_reason
+
 BASE = "https://music.163.com"
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -126,6 +128,8 @@ class NeteaseClient:
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             # 里面存着 MUSIC_U 登录凭证，落盘前收紧到仅属主可读写
             # （Windows 上 chmod 只能尽力而为，失败不影响保存）
             with contextlib.suppress(OSError):
@@ -200,7 +204,10 @@ class NeteaseClient:
         try:
             return r.json()
         except ValueError:
-            raise NeteaseError(f"返回非 JSON：{r.text[:120]!r}") from None
+            # The body of a failed response can quote signed URLs or a
+            # session value; keep at most a short, redacted excerpt.
+            snippet = sanitize_reason(r.text[:120], limit=120)
+            raise NeteaseError(f"返回非 JSON：{snippet!r}") from None
 
     # ---------- 扫码登录 ----------
 
@@ -331,7 +338,12 @@ class NeteaseClient:
             account, profile = self.account()
         except Exception as e:
             self.clear_cookies()
-            raise NeteaseError(f"校验登录态失败：{e}") from e
+            # ``e`` often is a requests error whose text embeds the failing
+            # URL (possibly with userinfo/query credentials). Keep the cause
+            # for debugging but give it a sanitized message, so neither the
+            # wrapper nor the chain can echo the secret.
+            cause = NeteaseError(sanitize_reason(e))
+            raise NeteaseError(f"校验登录态失败：{cause}") from cause
         if not account:
             self.clear_cookies()
             raise NeteaseError(

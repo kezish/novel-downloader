@@ -1709,6 +1709,13 @@ def _music_track_dict(track: object) -> dict[str, Any]:
             ),
         }
     data.pop("extra", None)
+    # Some providers put a session ``Cookie``/``Authorization`` in the
+    # download headers; those are for the engine, never for the page.
+    headers = data.get("http_headers")
+    if isinstance(headers, dict):
+        from novel_downloader.apps.music.serialize import redact_headers
+
+        data["http_headers"] = redact_headers(headers)
     return data
 
 
@@ -6192,7 +6199,9 @@ class ApiBridge:
             tracks = list(found[0] if isinstance(found, tuple) else found or ())
         except Exception as exc:  # noqa: BLE001 - reported to the page
             logger.exception("Music search failed on %s", platform)
-            return {"tracks": [], "error": format_error(exc)}
+            from novel_downloader.apps.music.serialize import sanitize_reason
+
+            return {"tracks": [], "error": sanitize_reason(format_error(exc))}
         return {
             "tracks": [_music_track_dict(track) for track in tracks],
             "search_id": funcs["CACHE"].put(tracks),
@@ -6306,8 +6315,10 @@ class ApiBridge:
                     state["partial"] = False
             except Exception as exc:  # noqa: BLE001 - reported through the poll
                 logger.exception("Aggregate music search crashed")
+                from novel_downloader.apps.music.serialize import sanitize_reason
+
                 with self._lock:
-                    state["error"] = format_error(exc)
+                    state["error"] = sanitize_reason(format_error(exc))
             finally:
                 with self._lock:
                     state["done"] = True
@@ -6466,6 +6477,13 @@ class ApiBridge:
                     getattr(_track, "path", "") or getattr(result, "path", "") or ""
                 )
                 reason = str(getattr(result, "reason", "") or "")
+                if reason:
+                    # Provider reasons can quote signed URLs / cookies.
+                    from novel_downloader.apps.music.serialize import (
+                        sanitize_reason,
+                    )
+
+                    reason = sanitize_reason(reason)
                 name = str(getattr(_track, "name", "") or "")
                 # Only report files that really exist: the page turns this
                 # into "open lyrics" buttons, and a stale path would make
@@ -6528,7 +6546,9 @@ class ApiBridge:
             )
         except Exception as exc:  # noqa: BLE001 - reported through the poll
             logger.exception("Music download crashed")
-            reason = format_error(exc)
+            from novel_downloader.apps.music.serialize import sanitize_reason
+
+            reason = sanitize_reason(format_error(exc))
             with self._lock:
                 counts["fail"] += 1
                 self._music_failed = True
@@ -6753,6 +6773,8 @@ class ApiBridge:
             }
 
             def worker() -> None:
+                from novel_downloader.apps.music.serialize import sanitize_reason
+
                 gate = threading.Semaphore(HEALTH_WORKERS)
 
                 def probe(key: str) -> None:
@@ -6772,7 +6794,9 @@ class ApiBridge:
                             if row is not None:
                                 row["done"] = True
                                 row["ok"] = bool(result.get("ok"))
-                                row["error"] = str(result.get("error") or "")
+                                row["error"] = sanitize_reason(
+                                    result.get("error") or ""
+                                )
                                 row["elapsed_ms"] = int(result.get("elapsed_ms") or 0)
 
                 threads = [

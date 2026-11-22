@@ -82,6 +82,20 @@ class _MusicUnavailable(Exception):
     """Raised when the optional music dependencies cannot be imported."""
 
 
+def _safe_error(value: object) -> str:
+    """
+    Redact credentials from a provider/platform error before showing it.
+
+    Provider exceptions embed the failing request URL and sometimes a
+    serialized cookie jar; both can carry ``MUSIC_U``/Bearer tokens.  The
+    sanitizer strips signed query strings, masks headers/cookies and caps the
+    text, while keeping the platform name/HTTP status needed to diagnose it.
+    """
+    from novel_downloader.apps.music.serialize import sanitize_reason
+
+    return sanitize_reason(value)
+
+
 @dataclass
 class _MusicEngine:
     """Lazily imported pieces of the optional music engine."""
@@ -162,7 +176,7 @@ def _require_engine() -> _MusicEngine:
                 "Music support is unavailable because optional dependencies "
                 "are missing. Install them with: "
                 'pip install "novel-downloader[music]" ({error})'
-            ).format(error=exc)
+            ).format(error=_safe_error(exc))
         )
         raise SystemExit(EXIT_FAILURE) from exc
 
@@ -180,7 +194,9 @@ def _create_provider(engine: _MusicEngine, platform: str) -> Any:
         )
         raise SystemExit(EXIT_USAGE) from exc
     except Exception as exc:
-        ui.error(t("Could not start this platform: {error}").format(error=exc))
+        ui.error(
+            t("Could not start this platform: {error}").format(error=_safe_error(exc))
+        )
         raise SystemExit(EXIT_FAILURE) from exc
 
 
@@ -221,7 +237,7 @@ def _search(
         if isinstance(exc, engine.login_expired):
             _login_expired_hint()
         else:
-            ui.error(t("Search failed: {err}").format(err=exc))
+            ui.error(t("Search failed: {err}").format(err=_safe_error(exc)))
         raise SystemExit(EXIT_FAILURE) from exc
 
     result = list(tracks)[: max(1, limit)]
@@ -257,7 +273,7 @@ def _search_all(
         else:
             result = search_all_isolated(keyword, limit=limit)
     except Exception as exc:
-        ui.error(t("Search failed: {err}").format(err=exc))
+        ui.error(t("Search failed: {err}").format(err=_safe_error(exc)))
         raise SystemExit(EXIT_FAILURE) from exc
     return list(result.tracks), int(result.total), list(result.platforms)
 
@@ -970,7 +986,7 @@ class MusicDownloadCmd(Command):
             if isinstance(exc, engine.login_expired):
                 _login_expired_hint()
             else:
-                ui.error(t("Download failed: {error}").format(error=exc))
+                ui.error(t("Download failed: {error}").format(error=_safe_error(exc)))
             raise SystemExit(EXIT_FAILURE) from exc
         finally:
             progress.stop()
@@ -1002,11 +1018,15 @@ class MusicDownloadCmd(Command):
                 lyrics_written += 1
             reason = str(getattr(record, "reason", "") or "")
             if status == "fail" and reason:
-                entry["reason"] = reason
+                entry["reason"] = _safe_error(reason)
             results_payload.append(entry)
 
         for name, reason in failed_pairs:
-            ui.warn(t("Failed: {name} ({reason})").format(name=name, reason=reason))
+            ui.warn(
+                t("Failed: {name} ({reason})").format(
+                    name=name, reason=_safe_error(reason)
+                )
+            )
         failed_total = int(fail or 0)
         summary = t("Done: {ok} succeeded, {skip} skipped, {fail} failed").format(
             ok=ok, skip=skip, fail=fail
@@ -1396,7 +1416,7 @@ class MusicHealthCmd(Command):
                 return {
                     "ok": False,
                     "elapsed_ms": 0,
-                    "error": str(exc) or type(exc).__name__,
+                    "error": _safe_error(exc) or type(exc).__name__,
                 }
 
         # 并发探测：以前是逐站 15 秒串行，25 个平台要等好几分钟。
@@ -1418,7 +1438,7 @@ class MusicHealthCmd(Command):
                 elapsed = int(result.get("elapsed_ms") or 0)
             except (TypeError, ValueError):
                 elapsed = 0
-            error_text = str(result.get("error") or "")
+            error_text = _safe_error(result.get("error") or "")
             if not ok:
                 failed += 1
             payload.append(

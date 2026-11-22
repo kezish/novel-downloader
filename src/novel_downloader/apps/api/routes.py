@@ -1943,8 +1943,14 @@ async def music_health(
 
     async def _check(key: str) -> dict[str, Any]:
         result = await run_in_threadpool(components.health_check, key, timeout=timeout)
+        # ``health_check`` redacts its own message; sanitize again so a test
+        # double (or a future provider) cannot echo a cookie/token to the
+        # client through ``error``.
+        from novel_downloader.apps.music.serialize import sanitize_reason
+
         payload: dict[str, Any] = {"platform": key}
         payload.update(dict(result))
+        payload["error"] = sanitize_reason(payload.get("error") or "")
         return payload
 
     results = await asyncio.gather(*(_check(key) for key in selected))

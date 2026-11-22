@@ -13,20 +13,22 @@ import threading
 import time
 from typing import Any
 
+from ..serialize import sanitize_reason
+
 _ERROR_LIMIT = 200
 
 
 def _describe(exc: BaseException) -> str:
-    """把底层异常归纳成一句人能看懂的话。"""
+    """把底层异常归纳成一句人能看懂的话（先脱敏再返回）。"""
     if isinstance(exc, ModuleNotFoundError):
         missing = exc.name or str(exc)
-        return f"缺少依赖：{missing}"
+        return f"缺少依赖：{sanitize_reason(missing, limit=_ERROR_LIMIT)}"
     if isinstance(exc, TimeoutError):
         return "搜索超时"
     name = type(exc).__name__
-    text = str(exc).strip().replace("\n", " ")
+    text = sanitize_reason(exc, limit=_ERROR_LIMIT)
     if text:
-        return f"{name}: {text[:_ERROR_LIMIT]}"
+        return f"{name}: {text}"
     return name
 
 

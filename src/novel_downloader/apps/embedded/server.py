@@ -2548,9 +2548,12 @@ def _handle_music_health(
         selected = _music_keys(components)
 
     results: list[dict[str, Any]] = []
+    from novel_downloader.apps.music.serialize import sanitize_reason
+
     for key in selected:
         payload: dict[str, Any] = {"platform": key}
         payload.update(dict(components.health_check(key, timeout=timeout)))
+        payload["error"] = sanitize_reason(payload.get("error") or "")
         results.append(payload)
     return results
 
