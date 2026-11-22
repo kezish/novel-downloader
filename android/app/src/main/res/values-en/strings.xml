@@ -166,6 +166,7 @@
     <string name="download_error_provider">The file provider failed to write; retry or switch to the system Downloads folder</string>
     <string name="download_error_file">Could not write the file; check the download folder permission or free space</string>
     <string name="download_error_file_exists">A file with the same name already exists</string>
+    <string name="download_error_device">The storage device is unavailable; check the storage holding the download folder</string>
     <string name="download_error_http_data">The server response was interrupted</string>
     <string name="download_error_http_code">The server returned an error status</string>
     <string name="download_error_redirects">Too many redirects</string>

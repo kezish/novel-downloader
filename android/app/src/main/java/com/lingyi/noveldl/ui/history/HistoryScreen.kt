@@ -103,12 +103,12 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
                 val fileName = pendingDownloads.remove(id) ?: return
                 val manager = appContext.getSystemService(DownloadManager::class.java) ?: return
                 val (status, reason) = queryDownload(manager, id)
-                when (status) {
-                    DownloadManager.STATUS_SUCCESSFUL ->
+                when (downloadCompletionState(status)) {
+                    DownloadCompletionState.Success ->
                         latestMessage(
                             appContext.getString(R.string.history_download_done, fileName),
                         )
-                    DownloadManager.STATUS_FAILED ->
+                    DownloadCompletionState.Failed ->
                         latestMessage(
                             appContext.getString(
                                 R.string.history_download_failed,
@@ -122,7 +122,8 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
                                     ),
                             ),
                         )
-                    else -> Unit
+                    // Pending/running/paused (or unreadable): not a failure.
+                    DownloadCompletionState.Ignored -> Unit
                 }
             }
         }
@@ -164,7 +165,10 @@ fun HistoryScreen(store: SettingsStore, onMessage: (String) -> Unit) {
             context.getString(
                 R.string.history_download_failed,
                 displayName,
-                reason.ifBlank { context.getString(R.string.history_download_unknown_error) },
+                downloadFailureReasonText(
+                    reason,
+                    context.getString(R.string.history_download_unknown_error),
+                ),
             )
         }
         // A classified SAF write failure gets its own wording (permission /

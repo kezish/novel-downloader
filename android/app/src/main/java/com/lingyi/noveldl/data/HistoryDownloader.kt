@@ -129,7 +129,7 @@ object HistoryDownloader {
         treeUri: Uri,
         onProgress: (DownloadProgress) -> Unit = {},
     ): Result<String> {
-        var created: DocumentFile? = null
+        var created: SafDocument? = null
         return try {
             withContext(Dispatchers.IO) {
                 val resolver = context.contentResolver
@@ -168,7 +168,7 @@ object HistoryDownloader {
                     ),
                 )
                 val target = (prepared as DocumentFileSafDocument).document
-                created = target
+                created = prepared
                 // Providers may still adjust the display name (e.g. enforce an
                 // extension); report what was actually created.
                 val savedName = prepared.name ?: desiredName
@@ -182,8 +182,9 @@ object HistoryDownloader {
                 // timeout and leaving a half-written document.
                 httpClient().executeCancellable(builder.build()).use { response ->
                     if (!response.isSuccessful) {
-                        throw IllegalStateException(
-                            context.getString(
+                        throw DownloadHttpException(
+                            status = response.code,
+                            message = context.getString(
                                 R.string.history_download_http_error,
                                 response.code,
                             ),
@@ -225,18 +226,17 @@ object HistoryDownloader {
         } catch (e: CancellationException) {
             // Never leave a half-written document behind, and never turn a
             // cancellation into a failure result.
-            created?.let { runCatching { it.delete() } }
+            discardPartialDocument(created)
             throw e
         } catch (e: DownloadFailureException) {
             // Already classified (permission / space / provider / network);
             // keep the kind so the caller can name the cause. Do not let the
             // IOException branch below relabel it as a network error.
-            created?.let { runCatching { it.delete() } }
-            Result.failure(e)
+            failureAfterCleanup<String>(created, e)
         } catch (e: IOException) {
             // Never leave a half-written document behind.
-            created?.let { runCatching { it.delete() } }
-            Result.failure(
+            failureAfterCleanup<String>(
+                created,
                 IllegalStateException(
                     context.getString(R.string.history_download_network_error),
                     e,
@@ -244,8 +244,7 @@ object HistoryDownloader {
             )
         } catch (e: Exception) {
             // Never leave a half-written document behind.
-            created?.let { runCatching { it.delete() } }
-            Result.failure(e)
+            failureAfterCleanup<String>(created, e)
         }
     }
 }
@@ -304,6 +303,44 @@ class DownloadFailureException(
     message: String? = null,
     cause: Throwable? = null,
 ) : Exception(message ?: kind.name, cause)
+
+/**
+ * A non-2xx HTTP response from the download endpoint.
+ *
+ * [status] carries the code for classification and tests, while [message] is
+ * the localized sentence shown to the user (it names the code). Keeping the
+ * status out of the text means the fallback decision never has to parse a
+ * translated message; it is still an [IllegalStateException] like the generic
+ * failure it replaces, so existing catch blocks are unaffected.
+ */
+class DownloadHttpException(
+    val status: Int,
+    message: String,
+) : IllegalStateException(message)
+
+/**
+ * Deletes the half-written SAF document created for a failed or cancelled
+ * download. A provider that throws on `delete()` must not replace the failure
+ * the caller is about to report, so the exception is swallowed; the document is
+ * then orphaned, which is why a retry starts from scratch instead of resuming.
+ */
+internal fun discardPartialDocument(created: SafDocument?) {
+    if (created == null) return
+    runCatching { created.delete() }
+}
+
+/**
+ * Failure result for [downloadToDirectory]: delete the partial document first,
+ * so a fallback or retry never leaves a truncated file behind, then report
+ * [error] unchanged.
+ *
+ * Kept separate from the Android-dependent body so the "clean up, then report
+ * / fall back" order is covered by plain JVM tests.
+ */
+internal fun <T> failureAfterCleanup(created: SafDocument?, error: Throwable): Result<T> {
+    discardPartialDocument(created)
+    return Result.failure(error)
+}
 
 /** Lower-case fragments providers/volumes use for "no space left". */
 private val NO_SPACE_MARKERS = listOf(
