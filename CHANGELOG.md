@@ -1,3 +1,31 @@
+## v1.38.0 (2026-11-22)
+
+轮询效率、运维诊断与桌面/官网体验。
+
+### Feature
+
+- **API 条件请求**：`/sites`、`/history`、`/music/platforms` 返回强 `ETag`，支持 `If-None-Match` → `304`（无 body，保留缓存/安全/请求 ID 头）；REST 与 embedded 一致，OpenAPI 声明 304
+- **`doctor` 存储诊断**：章节库数量/字节、抽样 `quick_check`、未来 schema、WAL/热日志跳过、只读与低磁盘告警，全程只读
+- **桌面窗口记忆**：保存/恢复尺寸、位置与最大化；多显示器变化、尺寸非法、窗口完全出屏时安全回退
+- **官网代码块复制**：6 个安装/校验命令块增加复制按钮，剪贴板不可用时回退 `execCommand` 并提示手动复制；无 JS 隐藏、双语标签
+- **Android 歌词按钮**：统一经 `MusicLyrics.buttons` 校验（私有根、canonical path、`.lrc` 后缀），服务端路径不再直接进入 UI
+- **发布工具**：`release.py --allow-tag-content-equal` 允许内容一致（tree 相同、SHA 不同）的远端 tag，用于 API 重放推送
+
+### Fix
+
+- **Android**：歌词 symlink 逃逸与过期路径不再显示按钮
+- **发布**：非 ASCII 路径推送不再被 C 引号化（`ls-tree -z`），并补回归测试
+
+### Docs
+
+- 新增中英搜索指南（规范化、意图、排序、过滤、缓存、退出码）
+- API 条件请求、`doctor` 存储诊断、发布流程 tag 重放说明
+
+### Test
+
+- Python **15091 passed / 61 skipped**；ruff/format、mypy 全绿
+- Android 全量 `testDebugUnitTest` 与 `lintDebug` 通过
+
 ## v1.37.1 (2026-11-21)
 
 补丁版：v1.37.0 之后的安全与并发修正。
