@@ -222,6 +222,36 @@ def test_doctor_redacts_credentials_tokens_and_absolute_paths(
     assert "cannot read" in config_row["detail"]
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "proxy_password",
+        "client_secret",
+        "auth_token",
+        "db_pwd",
+        "session_cookie",
+        "x_api_key",
+    ],
+)
+def test_prefixed_credential_keys_are_redacted(key: str) -> None:
+    """A prefix (``proxy_``, ``client_``) must not defeat redaction.
+
+    ``_`` is a word character, so the old ```` anchor never matched these
+    keys and their values leaked into doctor's ``detail``/``data``.
+    """
+    out = doctor._redact_text(f"failed with {key}=s3cr3t-value next")
+
+    assert "s3cr3t-value" not in out
+    assert key in out
+
+
+def test_non_secret_key_containing_a_keyword_is_not_redacted() -> None:
+    """``tokenizer`` is not a credential key, and its value stays readable."""
+    out = doctor._redact_text("tokenizer=bert-base next")
+
+    assert "bert-base" in out
+
+
 def test_doctor_absolute_configured_paths_are_masked(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

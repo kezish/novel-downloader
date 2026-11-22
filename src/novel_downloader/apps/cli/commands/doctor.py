@@ -155,7 +155,13 @@ _MAX_FAILURE_TEXT = 120
 #: exception text, and a third-party library may echo a token or password
 #: without asking.  The key itself is kept for context; only the value goes.
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b(token|api[_-]?key|secret|password|passwd|pwd|authorization|cookie)"
+    # Keys are often prefixed (``proxy_password``, ``client_secret``,
+    # ``auth_token``, ``db_pwd``); a plain ``\b`` cannot match those because
+    # ``_`` is a word character. Anchor on the start of the key, then let the
+    # keyword end it so ``tokenizer`` does not count as a credential.
+    r"(?i)(?<![A-Za-z0-9_.-])"
+    r"([A-Za-z0-9_.-]*?(?:token|api[_-]?key|secret|password|passwd|pwd|"
+    r"authorization|cookie))"
     r"(\s*[:=]\s*)"
     r"(\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
