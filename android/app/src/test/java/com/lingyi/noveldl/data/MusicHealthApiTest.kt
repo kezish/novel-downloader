@@ -23,12 +23,15 @@ class MusicHealthApiTest {
     fun startServer() {
         server = MockWebServer()
         server.start()
+        // 503 is a transient status; the retry backoff has its own test seam.
+        Api.retrySleeper = RetrySleeper { _, _ -> true }
         resetService()
     }
 
     @After
     fun stopServer() {
         server.shutdown()
+        Api.retrySleeper = CancellableRetrySleeper
         resetService()
     }
 
@@ -118,7 +121,9 @@ class MusicHealthApiTest {
         // The real server 503s with an install hint; inner quotes are avoided
         // because Api's error mapping reads the detail with a plain regex.
         val detail = "Music support is not available. Install it with: pip install novel-downloader[music]"
-        server.enqueue(json("""{"detail":"$detail"}""", 503))
+        repeat(Api.MAX_RETRIES + 1) {
+            server.enqueue(json("""{"detail":"$detail"}""", 503))
+        }
         Api.configure(baseUrl(), null)
 
         val result = Api.call { Api.service().musicHealth("netease", 5) }

@@ -36,6 +36,9 @@ class ApiClientTest {
     fun startServer() {
         server = MockWebServer()
         server.start()
+        // Status/transport retries are exercised without real backoff waits;
+        // ApiClientRetryTest pins the delays themselves.
+        Api.retrySleeper = RetrySleeper { _, _ -> true }
         resetService()
     }
 
@@ -43,6 +46,7 @@ class ApiClientTest {
     fun stopServer() {
         server.shutdown()
         Api.maxResponseBytes = MAX_JSON_RESPONSE_BYTES
+        Api.retrySleeper = CancellableRetrySleeper
         resetService()
     }
 
@@ -228,7 +232,10 @@ class ApiClientTest {
 
     @Test
     fun errorWithoutDetailFallsBackToHttpStatus() = runBlocking {
-        server.enqueue(json("""{"oops":true}""", 500))
+        // A 500 is transient: the final attempt is what surfaces.
+        repeat(Api.MAX_RETRIES + 1) {
+            server.enqueue(json("""{"oops":true}""", 500))
+        }
         Api.configure(baseUrl(), null)
 
         val result = Api.call { Api.service().health() }
@@ -591,7 +598,9 @@ class ApiClientTest {
         // The `detail` sits beyond the scan cap, so it must not be read (and
         // the fallback status text is used instead).
         val padding = "x".repeat(MAX_ERROR_BODY_BYTES.toInt() + 512)
-        server.enqueue(json("""{"padding":"$padding","detail":"late detail"}""", 500))
+        repeat(Api.MAX_RETRIES + 1) {
+            server.enqueue(json("""{"padding":"$padding","detail":"late detail"}""", 500))
+        }
         Api.configure(baseUrl(), null)
 
         val result = Api.call { Api.service().health() }
@@ -687,8 +696,9 @@ class ApiClientTest {
 
     // ------------------------------------------------------------------
     // Retry policy: OkHttp's internal retry is disabled so a POST is never
-    // silently replayed; GET/HEAD get exactly one explicit retry, and
-    // cancellation is never retried.
+    // silently replayed; GET/HEAD get a bounded explicit retry chain, and
+    // cancellation is never retried. ApiClientRetryTest covers the status
+    // retry/backoff/Retry-After details.
     // ------------------------------------------------------------------
 
     @Test

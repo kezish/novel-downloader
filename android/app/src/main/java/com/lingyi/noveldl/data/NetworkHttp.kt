@@ -144,7 +144,12 @@ internal class ApiOriginPolicy(
                 "refusing cleartext request to ${url.host}",
             )
         }
-        val sameOrigin = url.host == origin.host && url.port == origin.port
+        // Scheme is part of the origin, not just host and port: an
+        // HTTP->HTTPS upgrade on the same port is still a credential move and
+        // must be re-attached deliberately, never inferred.
+        val sameOrigin = url.scheme == origin.scheme &&
+            url.host == origin.host &&
+            url.port == origin.port
         val builder = request.newBuilder()
         if (sameOrigin) {
             if (apiKey.isNotEmpty()) builder.header(DOWNLOAD_API_KEY_HEADER, apiKey)
