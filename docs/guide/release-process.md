@@ -338,7 +338,28 @@ message/author/committer 与日期），最后**非 force** 更新分支 ref。�
 注意：API 创建的提交 sha 与本地不同、**tree 一致**，所以本地 `main` 会与远端分叉。
 之后继续走 API 推送，不要再普通 `git push`（会 non-fast-forward）。
 
-### 6.2 一次性补救脚本
+### 6.2 tag 指向重放提交
+
+如果本地 `main` 是 API replay 出来的（本地提交 SHA 与远端不同、tree 相同），
+`release.py` 创建的本地 tag 指向的提交在远端**不存在**：`git push` 与 REST
+`POST /git/refs` 都会失败（后者报 `Object does not exist`）。此时把远端 tag
+直接建在远端 `main` 的提交上（内容一致），再用内容一致开关续跑：
+
+```bash
+# 1. 远端 main 的 tree 必须与本地 tag 提交的 tree 相同
+#    （用 API GET /repos/<slug>/commits/main 与 git rev-parse <tag>^{tree} 对比）
+# 2. 经 API 创建 refs/tags/<tag> 指向远端 main 的提交
+# 3. 复用已构建产物发布
+.venv/Scripts/python.exe -u scripts/release.py \
+  --skip-build --allow-tag-content-equal
+```
+
+`--allow-tag-content-equal` 会读取远端 tag 提交的 tree，与**本地 tag 提交**的
+tree 比较（不是 HEAD，续跑时 HEAD 可能已前进）；只有相等才放行，**tag 不移动**。
+`git ls-remote` 不可达时脚本改经 REST 查询 tag ref，不会误判“远端还没有 tag”。
+若同时 HEAD 已前进，再加 `--allow-tag-behind`。
+
+### 6.3 一次性补救脚本
 
 仓库里还有一个**未入库**的一次性脚本 `build/push_replay.py`（`build/` 被 git 忽略）。
 它做同样的事，但把仓库和分支写死在文件里，并额外做一次内容级边界判定与推送后校验

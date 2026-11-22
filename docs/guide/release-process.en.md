@@ -373,7 +373,30 @@ Note: a commit created through the API has a different sha from the local one bu
 tree**, so local `main` diverges from the remote. Keep pushing through the API afterwards; a
 plain `git push` would be non-fast-forward.
 
-### 6.2 A one-off recovery script
+### 6.2 A tag that points at a replayed commit
+
+If local `main` was created through the API, local commit shas differ from the remote ones
+while the trees match. The local tag then points at a commit the remote **does not have**:
+both `git push` and the REST `POST /git/refs` fail (the latter with `Object does not exist`).
+Create the remote tag at the remote `main` commit (same content), then resume with the
+content-equality switch:
+
+```bash
+# 1. the remote main tree must equal the local tag commit's tree
+#    (compare API GET /repos/<slug>/commits/main with git rev-parse <tag>^{tree})
+# 2. create refs/tags/<tag> through the API at the remote main commit
+# 3. publish the already-built artifacts
+.venv/Scripts/python.exe -u scripts/release.py \
+  --skip-build --allow-tag-content-equal
+```
+
+`--allow-tag-content-equal` reads the remote tag commit's tree and compares it with the
+tree of the **local tag commit** (not HEAD, which may have moved during a resume). It only
+proceeds when they are equal and **never moves the tag**. When `git ls-remote` is
+unreachable the script queries the tag ref through REST instead of assuming it is absent.
+If HEAD has also moved, add `--allow-tag-behind`.
+
+### 6.3 A one-off recovery script
 
 The repo also has an **untracked** one-off script, `build/push_replay.py` (`build/` is
 git-ignored). It does the same job but hardcodes the repository and branch, adds a content-level
