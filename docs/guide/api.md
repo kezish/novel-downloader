@@ -1250,7 +1250,7 @@ JSON 响应**不**带 CSP。
 SSE 端点自己设置的 `Cache-Control: no-cache` 不会被覆盖。`/docs`、`/redoc`、
 `/openapi.json` 不在上述前缀内，不加这些头。
 
-### 条件请求（ETag / If-None-Match）
+### 条件请求（ETag / If-None-Match） {#conditional-requests}
 
 `/api/v1/sites`、`/api/v1/history`、`/api/v1/music/platforms` 的成功响应带
 强 `ETag`：响应体 SHA-256 摘要的前 16 字节（32 位十六进制，加引号）。

@@ -41,7 +41,7 @@ The **Settings → Updates** card has three switches and a check-now button:
 
 For "Later" versus "Skip this version", the pre-request `last_update_check` write, and where `skipped_update_version` is stored and how to clear it, see [The desktop update notice](updates.en.md#desktop-update-notice). These runtime values are outside the settings export (see the table below).
 
-### Exporting and importing desktop settings
+### Exporting and importing desktop settings {#exporting-and-importing-desktop-settings}
 
 The **Settings → Backup** card exports the **desktop preferences** as JSON and imports them on another machine. It exports `desktop_prefs.json` (by default under the application data directory's `music/` folder), not `settings.toml`; the file contains only preferences that are safe to move between machines. An import **merges** the file into the current preferences; it is not a factory reset.
 
@@ -133,6 +133,41 @@ Before writing, if the preferences file exists, it is copied to `<name>.bak` in 
 * The import does not check `app_version`, but it rejects a file whose `format_version` is not `1`. If the format is upgraded in a future release, an old export must be re-exported with the new version rather than having its version number edited by hand.
 * There is only one `.bak`: every import that reaches the write stage overwrites it. It is a rollback for the most recent import, not a history archive.
 * After a successful import the UI immediately refreshes the theme and the Settings cards and reloads the task / follow lists, but the process is **not restarted**; the interface language was never part of the import.
+
+### Desktop window geometry {#desktop-window-geometry}
+
+The desktop client stores the main window's position, size and maximized state in the **desktop preferences file** `desktop_prefs.json` under the `window_*` keys, not in `settings.toml`. The file normally lives in the application data directory's `music/` folder (on Windows usually `%LOCALAPPDATA%\novel_downloader\music\desktop_prefs.json`); when `NOVEL_MUSIC_HOME` is set, that directory is used instead.
+
+| Preference key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `window_width` | integer | `1220` | Width of the normal (unmaximized) window. At restore time a value below `980` or an invalid value falls back to the default; a value wider than the current virtual desktop is shrunk to the screen (but never below `980`) |
+| `window_height` | integer | `800` | Height of the normal window. Same rules, with a restore minimum of `640` and the same `640` floor when shrinking |
+| `window_x` | integer or `null` | absent (equivalent to `null`) | Left edge X. Negative values are valid and address a monitor left of the primary; when absent or `null`, the window manager chooses the position |
+| `window_y` | integer or `null` | absent (equivalent to `null`) | Top edge Y. Negative values are valid and address a monitor above the primary; when absent or `null`, the window manager chooses the position |
+| `window_maximized` | boolean | `false` | Whether to start maximized. Only JSON `true` enables it; it is independent of size/position and is restored even when it is the only one of the five keys present |
+
+**Behaviour**
+
+* **When it is saved**: at most once per second while dragging/resizing; immediately on maximize, restore and window close; an unchanged value is not rewritten. While maximized, the stored rectangle is the last normal one, so unmaximizing returns to the previous size instead of leaving a normal window the size of the screen.
+* **Multiple monitors**: on Windows, start-up queries the current virtual desktop and primary-screen bounds. When the saved monitor is gone (the rectangle overlaps no monitor), the window is centred on the primary; when it is only partly off-screen, it is nudged back inside the virtual desktop; negative coordinates are not treated as invalid.
+* **Platform difference**: monitor bounds are queried only on Windows. On other platforms or when the metrics are unavailable, the stored coordinates are used as-is with no off-screen correction, so the window can open outside the screen and must be reset manually.
+* **Coordinates come in pairs**: `window_x` / `window_y` are kept only when both are integers; if just one is stored (the other absent or `null`), both are discarded and the window manager chooses the position.
+* **Minimum size**: at restore time a width below `980` or height below `640` falls back to the default; the window itself also enforces `980×640` as its minimum. If the current screen is smaller than that minimum, the window can still exceed it.
+
+**Import / export does not include window state**
+
+Window geometry is **device-specific**, so it is outside the "Settings → Backup" export whitelist (the export contains only `theme`, the three update switches, `search_filters` and `search_sort`). An import writes only those six items and **never modifies** `window_*`. Moving to another machine therefore neither migrates the window position nor resets the window on the new machine. See "Exporting and importing desktop settings" above for the whitelist and contract.
+
+**Resetting it**
+
+The Settings page in the current build has **no** "Reset window position" button. To reset:
+
+1. Quit the desktop app completely (closing the window writes the state once more, and an edit made while it runs will be overwritten);
+2. open `desktop_prefs.json` and delete `window_width`, `window_height`, `window_x`, `window_y` and `window_maximized`, keeping the other keys and valid JSON; to cancel only maximization, delete `window_maximized` or set it to `false`; to let the system pick the position only, delete `window_x` / `window_y`;
+3. if `window_state.json` from an older build exists in the same directory, delete it as well; it is read only as a compatibility fallback when none of the five `window_*` keys exists;
+4. start the desktop app again.
+
+Delete the whole `desktop_prefs.json` only if you accept resetting **every** desktop preference in it (theme, update switches, and possibly historical keys such as the proxy password); back it up first. For step-by-step diagnosis see [Troubleshooting § The desktop window opens off-screen or at the wrong size](./troubleshooting.en.md#desktop-window-trouble).
 
 ### Keyboard and accessibility (desktop) {#desktop-keyboard-accessibility}
 

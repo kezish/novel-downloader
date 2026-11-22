@@ -1228,7 +1228,127 @@ For the full contract and whitelist see [Settings Reference § Exporting and imp
 
 ---
 
-## 19. Still Stuck?
+## 19. The API Returns 304 but Nothing Looks Updated {#api-304-no-update}
+
+**Symptoms**: when polling `GET /api/v1/history` (or `/sites`, `/music/platforms`), the response is `304 Not Modified` with an empty body and the client still shows old data; or a file was just exported but the `ETag` appears unchanged.
+
+**A 304 is not the same as a cache hit**
+
+| What you see | What actually happened | Body? |
+| --- | --- | --- |
+| No request reaches the server; the UI reuses old data | A `200` from these reference endpoints carries `Cache-Control: private, max-age=60`; for 60 seconds a browser or local cache may reuse it without asking the server | Yes, from the local cache |
+| The request reaches the server and returns `304 Not Modified` | The request carried `If-None-Match`; the server regenerated the current response, hashed it, and the bytes matched your stored validator exactly | **No** |
+| The request reaches the server and returns `200` | The content changed, the validator did not match, or no `If-None-Match` was sent | Yes, the full response |
+
+A `304` only means "the current representation is identical to this `ETag`". It does not mean "an update exists", and it is not the server skipping the query: the route still runs, only the body is omitted. A client receiving `304` must reuse the **previously stored response body**; parsing a `304` as empty JSON is exactly what looks like "no update".
+
+**Which endpoints support it**
+
+Only these three idempotent `GET` endpoints take part. The path must match (a trailing `/` is normalised), and query parameters (`/history?limit=20`) are part of the representation:
+
+| Endpoint | Content | When it changes |
+| --- | --- | --- |
+| `GET /api/v1/sites` | Site table for search/download | Plugin set or version changes; unrelated to tasks or search results |
+| `GET /api/v1/history` | Exported `.txt` / `.epub` files under `general.output_dir` | A file is added/removed, or its name, size or `mtime` changes |
+| `GET /api/v1/music/platforms` | Registered music platforms and notes | Music dependencies or platform registration change; unrelated to song search/download results |
+
+`/api/v1/tasks*`, `/api/v1/login*`, `/api/v1/music/jobs*`, `/api/v1/watchlist*`, `POST /api/v1/search` and `/downloads/*` do **not** take part: they send no `ETag` and never return `304`. Conditional handling applies to `GET` only, so do not probe for `ETag` with `curl -I` (`HEAD`). The embedded engine (desktop / Android standalone mode) provides the same strong `ETag` and `304` for these three paths only. See [Local API Service § Conditional requests](./api.en.md#conditional-requests) for the full contract.
+
+**Confirm that conditional requests really work**
+
+First send a request **without** `If-None-Match` and keep the headers and body:
+
+```bash
+BASE=http://127.0.0.1:8080
+
+# If a token is configured, add -H "Authorization: Bearer $TOKEN" to every curl below
+curl -sS -D /tmp/novel-h1.txt -o /tmp/novel-h1.json "$BASE/api/v1/history"
+grep -i '^etag:' /tmp/novel-h1.txt
+```
+
+Then reuse that `ETag`:
+
+```bash
+etag=$(grep -i '^etag:' /tmp/novel-h1.txt | sed 's/^[^:]*: //' | tr -d '\r')
+curl -sS -D - -o /dev/null -H "If-None-Match: $etag" "$BASE/api/v1/history"
+```
+
+Expected:
+
+- unchanged: status `304`, **no** `Content-Length` / `Content-Type`, still carrying `ETag`, `Cache-Control: private, max-age=60`, `X-Request-ID` and the security headers;
+- changed: `200` with a new `ETag`;
+- a `200` with no `ETag` at all: the path is not in the table, or the body exceeds 512 KiB (it is then streamed without buffering or hashing);
+- a `200` that does carry an `ETag`: the validator did not match, or that `ETag` was set by the route itself (a route-level validator wins; the middleware neither rewrites it nor turns the response into a `304`);
+- to check that the middleware is active, use `-H 'If-None-Match: *'` temporarily: for a successful response from a participating endpoint that is under 512 KiB and has no route-level `ETag`, it should produce `304` (`*` matches any current representation).
+
+**Why the content appears unchanged**
+
+1. **Wrong endpoint**: `/history` lists only **exported** `.txt` / `.epub` files. It does not reflect in-progress or unexported tasks, search results, or listening history. Task progress comes from `GET /api/v1/tasks/{task_id}` (which never returns `304`); `/sites` and `/music/platforms` change only when the registry changes.
+2. **The file never entered the history**: the export directory differs from the `general.output_dir` the API process reads, the suffix is not `.txt` / `.epub`, or the export task has not finished. In all three cases the list and its `ETag` stay the same. Compare against an unconditional `200`:
+
+   ```bash
+   curl -sS "$BASE/api/v1/history" | jq '{total, files: .files[0:3]}'
+   ```
+
+3. **Different query parameters**: `/history?limit=5` and `/history?limit=20` are different representations, and their `ETag`s must not be mixed. Store the validator and body per **full URL, including the query string**.
+4. **A file was replaced in place with the same size and `mtime`**: the `/history` representation contains only name, extension, size and `mtime`. If all are unchanged the response really is identical, and `304` is correct. If content changes must show up, have the exporter rewrite the file and update its timestamp.
+5. **Browser cache rather than a 304**: when DevTools says "(disk cache)" / "from cache" and no request was made, `max-age=60` is at work, not the server. Retest with `curl`, a private window or caching disabled, or wait 60 seconds.
+6. **The client treats a 304 as an empty response**: this is the most common cause. On `304`, keep using the locally cached body; replace the body and `ETag` only on a `200`, and only after the response was read completely.
+
+**See also**: [Local API Service § Response headers and CORS contract](./api.en.md#conditional-requests) covers `ETag` generation, the weak/list/`*` rules for `If-None-Match`, and the 512 KiB limit.
+
+---
+
+## 20. The Desktop Window Opens Off-screen or at the Wrong Size {#desktop-window-trouble}
+
+**Symptoms**: after start-up the desktop window is completely off-screen, lands on a monitor that was unplugged, shows only a title bar, opens at an abnormal size every time, or becomes full-screen-sized after unmaximizing.
+
+**How start-up restores it** (from the `window_*` keys in the desktop preference file `desktop_prefs.json`):
+
+| Stored state | Start-up behaviour |
+| --- | --- |
+| None of the five `window_*` keys exists | The legacy `window_state.json` is tried first; if that is absent too, the default `1220×800` is used, with the position chosen by the window manager and not maximized |
+| Width/height missing, not an integer, ≤ 0, absurdly large, or below `980×640` | That dimension falls back to its default (`1220` wide / `800` high) |
+| Window larger than the current virtual desktop | Shrunk to the virtual desktop width/height, but never below `980×640`; a screen smaller than that can still be exceeded |
+| Only `window_x` or only `window_y` | Both are discarded; the window manager chooses the position |
+| `window_x` / `window_y` are integers | Kept; negative values are valid and address a monitor left of/above the primary |
+| The saved rectangle does not overlap any connected monitor | Centred on the primary monitor (typical when the saved monitor was unplugged) |
+| The window is only partly off-screen | Nudged back inside the virtual desktop |
+| `window_maximized` is JSON `true` | Starts maximized; it is independent of size/position, so it still applies when the geometry keys are absent |
+
+Monitor bounds are queried only on **Windows** (`GetSystemMetrics` for the virtual desktop and primary screen). On other platforms, or when the metrics are unavailable, start-up trusts the stored `x` / `y` and performs no off-screen correction; if the window is completely outside, only the reset below will recover it.
+
+**When it is saved**: at most once per second while dragging/resizing, and immediately on maximize, restore and window close; an unchanged value is not rewritten. While maximized, the saved geometry is the **last normal (unmaximized) rectangle**, so unmaximizing returns to the previous size instead of a normal window the size of the screen. Saving is best effort: an unwritable preferences file is logged and never blocks window operations.
+
+**Resetting it (the current build has no Settings button for this)**
+
+1. Quit the desktop app completely. Minimizing is not enough: closing the window writes the state once more.
+2. Find `desktop_prefs.json`: on Windows it is normally under `%LOCALAPPDATA%\novel_downloader\music\`; when `NOVEL_MUSIC_HOME` is set, that directory is used instead.
+3. In a text editor, delete `window_width`, `window_height`, `window_x`, `window_y` and `window_maximized`, leaving the other keys and valid JSON intact. Deleting only `window_x` / `window_y` makes the system choose a position but keeps the size and maximized state; deleting only `window_maximized` (or setting it to `false`) cancels just the maximized state.
+4. If `window_state.json` from an older build exists in the same directory, delete it as well. It is read only as a compatibility fallback when **none of the five `window_*` keys exists**, so leaving it behind can restore the old geometry.
+5. Delete the whole `desktop_prefs.json` only if you accept resetting **every** desktop preference in it (theme, update switches, and possibly historical keys such as the proxy password); back it up first.
+6. Start the desktop app again.
+
+If the window returns to the default size on every start, the state is not being written: check whether the preferences file is read-only or locked by a sync client or antivirus, and set the log level to `DEBUG` to look for `Could not persist desktop prefs`.
+
+**See also**: [Settings Reference § Desktop window geometry](./settings-reference.en.md#desktop-window-geometry) lists the key types, defaults and import/export behaviour.
+
+---
+
+## 21. Few Results, No Results, or Unexpected Ordering {#search-guide}
+
+Start with the [search guide](./search.en.md), which explains the pipeline in order: keyword normalization, query intent, ranking, filtering and caching:
+
+- **Few or no results** → [Search guide § Few or no results](./search.en.md#few-or-no-results): read the tally line `completed / failed / skipped`, then check the filters, browser-assisted sites and the `--site` spelling.
+- **Unexpected ordering** → [Search guide § The order looks wrong](./search.en.md#order-looks-wrong): `quality` is a blended score, not pure relevance; use `--json` to read `rank_score`, `match_tier` and `query_intent`, or switch explicitly with `--sort title|author|words|update`.
+- **Relevance floor and filtering details** → [Ranking](./search.en.md#ranking), [Filtering](./search.en.md#filters).
+- **Identical searches still hit every site** → [Caching](./search.en.md#cache), and "Search Cache" above.
+
+For all CLI options and examples see [CLI Usage § search subcommand](./cli-examples.en.md); for the REST request shape, `total`/`results`/`query_intent` and streaming search see [Local API Service § Search](./api.en.md).
+
+---
+
+## 22. Still Stuck?
 
 Include the following information when opening an issue:
 

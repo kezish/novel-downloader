@@ -394,7 +394,7 @@ The REST endpoints have a different shape: `POST /search` returns `{total, resul
 
 ## FAQ {#faq}
 
-### Few or no results
+### Few or no results {#few-or-no-results}
 
 1. Read the tally: `N completed / M failed / K skipped`. Many `failed` entries usually mean sites did not answer within the 5-second budget; raise `--timeout` or verify one site with `--site` first.
 2. If `completed` is high but results are empty, the keyword may be too specific; try the "title + author" multi-word form.
@@ -402,7 +402,7 @@ The REST endpoints have a different shape: `POST /search` returns `{total, resul
 4. With `--min-words` / `--updated-after` set, rows lacking the corresponding field are dropped; remove the filters to check whether the book itself is searchable.
 5. A wrong `--site` exits with code `2` and lists the available sites instead of returning an empty list.
 
-### The order looks wrong
+### The order looks wrong {#order-looks-wrong}
 
 - `quality` is a **blended score**, not pure relevance: relevance is 0.55, while words, recency, site priority and completeness together are 0.45. Read `rank_score` and `match_tier` in `--json` to explain each row's position.
 - With a decided intent, the outer key is the primary field's `match_tier`. A sparse-metadata book whose title matches exactly is deliberately placed above a metadata-rich book whose title merely contains an author name.

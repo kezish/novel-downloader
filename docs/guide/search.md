@@ -394,7 +394,7 @@ REST 端点的形状不同：`POST /search` 返回 `{total, results, query_inten
 
 ## 常见问题 {#faq}
 
-### 结果很少或为空
+### 结果很少或为空 {#few-or-no-results}
 
 1. 看汇总行：`N completed / M failed / K skipped`。若 `failed` 很多，多半是所有站点都在 5 秒预算内没答完；提高 `--timeout` 或先用 `--site` 锁定一个站点验证。
 2. 若 `completed` 很多但结果为空，检查关键词是否过于具体，或换用「书名 + 作者」的多词写法。
@@ -402,7 +402,7 @@ REST 端点的形状不同：`POST /search` 返回 `{total, results, query_inten
 4. 设置过 `--min-words` / `--updated-after` 时，缺少对应字段的行会被丢弃；先去掉过滤确认书本身能搜到。
 5. `--site` 写错会以退出码 `2` 报错，并列出可用站点，而不是返回空列表。
 
-### 排序看起来不对
+### 排序看起来不对 {#order-looks-wrong}
 
 - `quality` 是**综合分**，不是纯相关度：相关度占 0.55，字数、更新时间、站点优先级与完整度合计占 0.45。看 `--json` 里的 `rank_score` 与 `match_tier` 可以解释每一行的位置。
 - 判定出查询意图时，外层键是主字段的 `match_tier`。一本元数据稀疏但书名精确匹配的书，会故意排在「书名恰好包含作者名」的富元数据书前面。

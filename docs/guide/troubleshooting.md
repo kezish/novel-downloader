@@ -1074,7 +1074,127 @@ novel-cli storage backup --out ~/novel-backups --keep 7
 
 ---
 
-## 19. 仍有问题？
+## 19. API 返回 304 但没有看到更新 {#api-304-no-update}
+
+**现象**：轮询 `GET /api/v1/history`（或 `/sites`、`/music/platforms`）时收到 `304 Not Modified`、响应体为空，客户端仍显示旧数据；或者刚导出了新文件，`ETag` 看起来没有变化。
+
+**先分清 304 与缓存**
+
+| 你看到的现象 | 实际发生了什么 | 有响应体吗 |
+| --- | --- | --- |
+| 请求没有到达服务器，界面直接复用旧结果 | 上述参考端点的 `200` 带 `Cache-Control: private, max-age=60`；60 秒内浏览器或本地缓存可以不再询问服务器 | 有，来自本地缓存 |
+| 请求到达服务器，返回 `304 Not Modified` | 请求带了 `If-None-Match`，服务器重新生成当前响应并计算摘要，结果与你保存的校验器逐字节相同 | **没有** |
+| 请求到达服务器，返回 `200` | 内容变了、校验器不匹配，或请求没带 `If-None-Match` | 有，完整响应 |
+
+`304` 只表示「当前表示与这个 `ETag` 相同」。它既不是「有新版本」，也不是「服务器跳过了查询」：路由仍然执行，只是不传输响应体。客户端收到 `304` 必须复用**上次保存的响应体**；把 `304` 当空 JSON 解析，表现就是「没有更新」。
+
+**哪些端点支持**
+
+只有下面三个幂等 `GET` 端点参与条件请求；路径必须匹配（末尾的 `/` 会被规范化），查询参数（如 `/history?limit=20`）是表示的一部分：
+
+| 端点 | 内容 | 什么时候会变 |
+| --- | --- | --- |
+| `GET /api/v1/sites` | 搜索/下载支持的站点表 | 插件集合或版本变化；与任务、搜索结果无关 |
+| `GET /api/v1/history` | `general.output_dir` 下已导出的 `.txt` / `.epub` 文件列表 | 文件新增/删除，或名称、大小、`mtime` 改变 |
+| `GET /api/v1/music/platforms` | 已注册的音乐平台与说明 | 音乐依赖或平台注册变化；与歌曲搜索/下载结果无关 |
+
+`/api/v1/tasks*`、`/api/v1/login*`、`/api/v1/music/jobs*`、`/api/v1/watchlist*`、`POST /api/v1/search` 和 `/downloads/*` **不参与**，不会发送 `ETag`，也不会返回 `304`。条件请求只处理 `GET`，所以不要用 `curl -I`（`HEAD`）探测 `ETag`。内嵌引擎（桌面端 / Android 独立模式）也只为这三个路径提供同样的强 `ETag` 与 `304`。完整契约见 [本地 API 服务 § 条件请求](./api.md#conditional-requests)。
+
+**确认条件请求是否真的在工作**
+
+先发一次**不带** `If-None-Match` 的请求，保存响应头与响应体：
+
+```bash
+BASE=http://127.0.0.1:8080
+
+# 配置了 token 时，给下面每条 curl 都加上 -H "Authorization: Bearer $TOKEN"
+curl -sS -D /tmp/novel-h1.txt -o /tmp/novel-h1.json "$BASE/api/v1/history"
+grep -i '^etag:' /tmp/novel-h1.txt
+```
+
+拿到 `ETag` 后再发条件请求：
+
+```bash
+etag=$(grep -i '^etag:' /tmp/novel-h1.txt | sed 's/^[^:]*: //' | tr -d '\r')
+curl -sS -D - -o /dev/null -H "If-None-Match: $etag" "$BASE/api/v1/history"
+```
+
+预期结果：
+
+- 内容未变：状态行 `304`，**没有** `Content-Length` / `Content-Type`，仍带 `ETag`、`Cache-Control: private, max-age=60`、`X-Request-ID` 与安全响应头；
+- 内容已变：`200` 与新 `ETag`；
+- 若 `200` 里根本没有 `ETag`：路径不在上表，或响应超过 512 KiB（此时不缓冲、不哈希）；
+- 若 `200` 带 `ETag` 但条件请求仍是 `200`：校验器不匹配，或该 `ETag` 是路由自己设置的（路由级校验器优先，中间件不会改写它，也不会据此返回 `304`）；
+- 想确认中间件是否生效，可临时用 `-H 'If-None-Match: *'`：对参与端点的一次成功响应（小于 512 KiB 且没有路由级 `ETag`）应得到 `304`（`*` 匹配任意当前表示）。
+
+**内容为什么看起来没变**
+
+1. **端点选错了**：`/history` 只列**已导出**的 `.txt` / `.epub` 文件，不反映下载中/未导出的任务，也不反映搜索或听歌记录。任务进度看 `GET /api/v1/tasks/{task_id}`（该端点不返回 `304`）；`/sites` 与 `/music/platforms` 只在注册表变化时改变。
+2. **文件没有进入历史**：导出目录与 API 进程读取的 `general.output_dir` 不一致、文件后缀不是 `.txt` / `.epub`，或导出任务尚未完成，列表与 `ETag` 都不会变。用不带条件的 `200` 响应对照 `total` 与 `files`：
+
+   ```bash
+   curl -sS "$BASE/api/v1/history" | jq '{total, files: .files[0:3]}'
+   ```
+
+3. **查询参数不同**：`/history?limit=5` 与 `/history?limit=20` 是不同表示，各自的 `ETag` 不能混用。客户端应按**完整 URL（含查询串）**保存校验器与响应体。
+4. **文件被原地替换但大小和 `mtime` 都没变**：`/history` 的表示只含名称、后缀、大小与 `mtime`；三者都相同就会得到同一个响应，`304` 是正确结果。若确实需要反映内容变化，请让导出器重写文件并更新时间。
+5. **浏览器缓存而不是 304**：DevTools 里显示 "(disk cache)" / "from cache" 且没有请求时，是 `max-age=60` 在起作用，不是服务器返回 `304`。用 `curl`、无痕窗口或禁用缓存复测，等待 60 秒后再看。
+6. **客户端把 304 当成了空响应**：这是「304 但没有更新」最常见的原因。收到 `304` 时应继续使用本地缓存的 body；只有收到 `200` 时才替换 body 与 `ETag`，并且只在响应完整读取成功后更新缓存。
+
+**相关**：[本地 API 服务 § 响应头与 CORS 契约](./api.md#conditional-requests) 说明了 `ETag` 的生成方式、`If-None-Match` 的弱比较/列表/`*` 规则，以及 512 KiB 上限。
+
+---
+
+## 20. 桌面窗口位置或大小异常 {#desktop-window-trouble}
+
+**现象**：桌面端启动后窗口完全在屏幕外、跑到已拔掉的显示器上、只剩一条标题栏，或每次都以异常大小打开；取消最大化后窗口变成全屏大小。
+
+**启动时如何恢复**（值来自桌面偏好文件 `desktop_prefs.json` 的 `window_*` 键）：
+
+| 存储状态 | 启动行为 |
+| --- | --- |
+| 五个 `window_*` 键都不存在 | 先尝试旧版遗留的 `window_state.json`；也没有则使用默认 `1220×800`，位置由窗口管理器决定，不最大化 |
+| 宽度/高度缺失、非整数、≤ 0、过大，或小于 `980×640` | 该维度回退到默认值（宽 `1220` / 高 `800`） |
+| 窗口尺寸大于当前虚拟桌面 | 收缩到虚拟桌面宽/高；但不会低于 `980×640`，所以屏幕本身更小时仍可能超出 |
+| 只有 `window_x` 或只有 `window_y` | 两个都丢弃，位置交给窗口管理器 |
+| `window_x` / `window_y` 是整数 | 保留；负值合法，表示主屏左侧/上方的显示器 |
+| 保存的窗口矩形与所有已连接显示器都不相交 | 在主屏居中打开（典型场景：保存位置所属的显示器已拔掉） |
+| 窗口只有一部分在屏幕外 | 移回虚拟桌面范围内 |
+| `window_maximized` 是 JSON `true` | 以最大化启动；它与尺寸/位置独立，即使尺寸键缺失也会最大化 |
+
+显示器边界只在 **Windows** 上查询（`GetSystemMetrics` 的虚拟桌面与主屏尺寸）。其他平台或取不到指标时，启动会直接使用保存的 `x` / `y`，不做屏外校正；如果窗口完全在屏外，只能按下面的方法重置。
+
+**保存时机**：拖动/缩放期间最多每秒写一次；最大化、还原和关闭窗口时强制写入；值与上次相同则不重复写。窗口最大化时保存的是**最大化前的普通尺寸**，因此取消最大化会回到原尺寸，而不是「全屏大小的普通窗口」。保存是尽力而为：偏好文件不可写时只记日志，不会阻止窗口操作。
+
+**重置方法（当前版本没有设置页按钮）**
+
+1. 完全退出桌面端。只最小化不行：关闭窗口时还会再写一次状态。
+2. 找到 `desktop_prefs.json`：Windows 默认在 `%LOCALAPPDATA%\novel_downloader\music\`；设置 `NOVEL_MUSIC_HOME` 时以该目录为准。
+3. 用文本编辑器删除 `window_width`、`window_height`、`window_x`、`window_y`、`window_maximized` 这五个键，保留其余键和合法 JSON。只删 `window_x` / `window_y` 会让系统重新选位置，但保留大小与最大化状态；只删 `window_maximized`（或设为 `false`）可单独取消最大化。
+4. 如果同目录还有旧版本留下的 `window_state.json`，一并删除。它只在**五个 `window_*` 键都不存在**时作为兼容回退读取；留着它可能把旧几何又恢复回来。
+5. 只有在愿意重置该文件中的**所有**桌面偏好（可能包括主题、更新开关、代理密码等历史键）时，才直接删除整个 `desktop_prefs.json`；删除前先备份。
+6. 重新启动桌面端。
+
+如果每次启动都回到默认大小，说明状态没有写成功：检查偏好文件是否只读、被同步盘/杀毒软件锁住；把日志级别调到 `DEBUG` 后查找 `Could not persist desktop prefs`。
+
+**相关**：[设置项参考 § 桌面窗口位置与大小记忆](./settings-reference.md#desktop-window-geometry) 列出这些键的类型、默认值与导入/导出行为。
+
+---
+
+## 21. 结果很少、为空或排序不符 {#search-guide}
+
+这三类问题先看 [搜索指南](./search.md)，它按处理顺序说明了关键词规范化、查询意图、排序、过滤与缓存：
+
+- **结果很少或为空** → [搜索指南 § 结果很少或为空](./search.md#few-or-no-results)：先看汇总行的 `completed / failed / skipped`，再检查过滤条件、浏览器辅助站点与 `--site` 拼写。
+- **排序不符合预期** → [搜索指南 § 排序看起来不对](./search.md#order-looks-wrong)：`quality` 是综合分而非纯相关度；用 `--json` 看 `rank_score`、`match_tier` 与 `query_intent`，或显式换用 `--sort title|author|words|update`。
+- **相关度下限与过滤细节** → [排序](./search.md#ranking)、[过滤](./search.md#filters)。
+- **重复搜索仍访问站点** → [缓存](./search.md#cache)，以及上文「搜索结果缓存」。
+
+CLI 的完整选项与示例见 [CLI 用法 § search 子命令](./cli-examples.md)；REST 请求形状、`total`/`results`/`query_intent` 与流式搜索见 [本地 API 服务 § 搜索](./api.md)。
+
+---
+
+## 22. 仍有问题？
 
 带上下面的信息提交 Issue：
 

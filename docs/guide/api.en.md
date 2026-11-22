@@ -1427,7 +1427,7 @@ A `Cache-Control` set by an SSE route (`no-cache`) is never overridden.
 `/docs`, `/redoc` and `/openapi.json` are outside those prefixes and receive
 none of these headers.
 
-### Conditional requests (ETag / If-None-Match)
+### Conditional requests (ETag / If-None-Match) {#conditional-requests}
 
 A successful `/api/v1/sites`, `/api/v1/history` or `/api/v1/music/platforms`
 response carries a strong `ETag`: the first 16 bytes of the SHA-256 of the
