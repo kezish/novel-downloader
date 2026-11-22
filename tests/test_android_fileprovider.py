@@ -200,7 +200,11 @@ def test_every_get_uri_for_file_site_grants_a_single_read_only_uri() -> None:
         assert "FLAG_GRANT_PREFIX_URI_PERMISSION" not in text, name
         # The authority is derived from the installed application id, which is
         # what ${applicationId}.fileprovider resolves to.
-        assert re.search(r"\$\{context\.packageName\}\.fileprovider", text), name
+        assert re.search(
+            r"\$\{context\.packageName\}\.fileprovider"
+            r'|"\$packageName\.fileprovider"',
+            text,
+        ), name
 
     # There is no share (ACTION_SEND) path; adding one must be a deliberate
     # change that re-runs this audit.

@@ -186,7 +186,7 @@ _DATASTORE_RE = re.compile(r"preferencesDataStore\(\s*name\s*=\s*\"([^\"]+)\"")
 # ``File(context.filesDir, CONST)`` / ``File(context.applicationContext.filesDir,
 # CONST)`` / ``filesDir.resolve(CONST)``.
 _FILES_ENTRY_RE = re.compile(
-    r"(?:\.filesDir\s*,\s*([A-Za-z_]\w*|\"[^\"]*\")"
+    r"(?:\.?filesDir\s*,\s*([A-Za-z_]\w*|\"[^\"]*\")"
     r"|filesDir\.resolve\(\s*([A-Za-z_]\w*)\s*\))"
 )
 
