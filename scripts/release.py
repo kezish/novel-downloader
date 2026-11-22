@@ -2617,6 +2617,19 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
     remote_sha = remote_tag_commit(repo_root, tag)
     client = GitHubClient(slug, token, api_base=args.api_base)
     content_equal_ok = bool(args.allow_tag_content_equal and args.skip_build)
+    if remote_sha is None and content_equal_ok:
+        # ``git ls-remote`` needs github.com:443, which is exactly what is
+        # usually blocked when this flag matters.  Ask the REST API instead of
+        # assuming the tag is absent: without this the run would try to recreate
+        # a tag that already exists at the content-equal replay commit.
+        try:
+            remote_sha = client.get_tag_ref_sha(tag)
+        except ReleaseError as exc:
+            print(
+                f"warning: could not query the tag ref through the API ({exc}); "
+                "assuming it is not pushed yet",
+                file=sys.stderr,
+            )
     remote_tree = None
     head_tree = None
     if (
