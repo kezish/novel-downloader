@@ -2,19 +2,66 @@
 
 > 面向下一个接手本仓库的会话。只写**当前真实状态、坑、下一步**；项目规则以 `AGENTS.md` 为准。
 > 本文件替换 2026-10-17 的旧交接材料（旧版描述的 NiceGUI `novel-web` 已经移除，别再去 `apps/web/` 找东西）。
+> 版本、测试计数与行为以 **v1.38.1** tag 为基线；工作区若有未提交改动，先看 `git status` / `git log` 再判断。
 
 ---
 
 ## 0. 一句话现状
 
 - **版本 v1.38.1**，分支 `main`；最新 release：<https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.38.1>
-- 全量测试 **15173 passed / 64 skipped**；`ruff check`、`ruff format --check`（857 files）、`mypy src`（549 files）全绿；Android 全量单测、`lintDebug` 0 error
+- **v1.38.1 门禁实测**：全量测试 **15173 passed / 64 skipped**（约 9 分钟）；`ruff check` 全绿、`ruff format --check`（870 files）、`mypy src`（550 source files）无报错；Android **58 个测试类 / 768 个用例**全过，`lintDebug` 通过
 - 产品名 **书音 BookTone**；主色 **藏青 `#1E3A5F`（结构）+ 暖橙 `#C2410C`（动作）**，桌面 / Android / 官网 / 图标 / OG 已统一
 - 三端：CLI（`novel-cli`）、REST API（`novel-api`）、Windows 桌面（pywebview + 单文件 HTML）；另有 Android（Kotlin/Compose，可选 Chaquopy 独立引擎）
+- 能力面：搜索过滤 / 排序 / 查询意图贯通三端；API 条件请求（3 个参考端点 `ETag`/`304`）；`doctor` 只读存储诊断；Windows 桌面窗口记忆；Android 本机引擎 bearer token 与更新验签**机制**（尚未启用可信公钥）；音乐凭据全链路脱敏
 
 ---
 
-## 1. 五分钟上手
+## 1. 最近完成（v1.37.0 → v1.38.1，2026-11-21 ~ 22）
+
+### API 条件请求与轮询效率
+
+- 只有三个参考端点参与：`GET /api/v1/sites`、`/api/v1/history`、`/api/v1/music/platforms`。响应体 SHA-256 前 16 字节作为强 `ETag`；`If-None-Match` 命中返回 `304`（无 body，保留 `ETag`、`Cache-Control`、安全头与 `X-Request-ID`）。
+- 响应体超过 **512 KiB** 不生成 `ETag`（避免缓冲与哈希开销，`conditional_get.ETAG_MAX_BODY_BYTES`）；`/tasks*`、`/login*`、`/music/jobs*` 等实时/凭据端点永不发 validator。
+- REST 与 embedded 行为一致，OpenAPI 声明 `304` 与 `If-None-Match`。实现：`apps/common/conditional_get.py`、`apps/api/middleware.py:ConditionalGetMiddleware`、`apps/embedded/server.py`。
+- 文档：`docs/guide/api.md` §条件请求。
+
+### 运维诊断与桌面体验
+
+- `novel-cli doctor` 新增「章节库」只读检查：库数量/字节、抽样 `quick_check`、未来 schema、WAL/热日志跳过、只读与低磁盘告警；不创建目录或 `-wal`/`-shm`，也不读取标题/正文（`--fix` 仍会创建输出/缓存/日志目录，但不碰 `raw_data`），`--json` 字段有契约测试。
+- 桌面窗口记忆（`apps/desktop/window_state.py` + `desktop_prefs.json`）：保存/恢复尺寸、位置与最大化；Windows 下按虚拟桌面/主屏 bounds 校正，已卸载显示器上的原点回到主屏居中，窗口只是部分出屏时挪回可视区；负数坐标（左侧/上方副屏）保留。
+- 桌面设置页同期补齐：歌词内嵌开关、「跳过此版本」持久化、设置导出/导入（白名单 + `.bak` + 原子写）、搜索缓存清理两步确认、键盘导航与读屏语义。
+- 官网 6 个安装/校验命令块加复制按钮（`website/main.js`）：`navigator.clipboard` → `execCommand("copy")` 回退 → 提示手动复制；无 JS 时按钮保持隐藏，中英标签齐全。
+
+### 文档
+
+- 新增 `docs/guide/search.md` / `search.en.md`（2026-11-21）：关键词规范化、查询意图、排序、过滤、缓存 key、退出码、流式搜索差异。
+- `docs/guide/api.md` 补条件请求（`ETag` / `If-None-Match` / `304`、512 KiB 上限、embedded 一致性）；`cli-examples.md` / `troubleshooting.md` 补 `doctor` 章节库诊断；`release-process.md` 补 tag 重放与断点续跑。
+- 已有专页：`docs/guide/storage.md`（11-15，存储/备份/恢复）、`docs/guide/update-signing.md`（11-16，签名格式与启用步骤）。
+
+### Android
+
+- **更新验签机制**：`ManifestSignature.kt` / `UpdateChecker.TRUSTED_UPDATE_KEYS` 非空时校验 Ed25519 清单签名（canonical JSON 与 Python 端逐字节一致）；未签名、未知密钥或被篡改一律拒绝，且不回退 GitHub API。**当前 `TRUSTED_UPDATE_KEYS` 仍为空 = 未启用**。
+- **本机引擎 token**：`EmbeddedEngine.generateEmbeddedToken()` 用 CSPRNG 生成 per-process bearer token，经环境变量交给 Python 引擎；缺失/不匹配返回 `401`，且路由隐藏，仅 `127.0.0.1` 可访问。
+- **API 客户端有界重试**（`ApiClient.kt`）：408/429/5xx 有界重试并遵守 `Retry-After`（上限 10 s）；网络异常仅 GET/HEAD 重试，POST/PUT/DELETE 只重放 408/429、不重放 5xx；等待可取消，退避分片检查取消。
+- 歌词按钮统一经 `MusicLyrics.buttons` 校验（私有根、canonical path、`.lrc` 后缀），服务端路径不再直接进 UI。
+- `assembleRelease` 缺签名材料时显式失败，不再静默回退 debug 签名。
+
+### 安全与正确性
+
+- **音乐凭据脱敏**：`health/search/download` 的错误文本、`http_headers`、日志统一走 `redact_credentials` / `redact_headers` / `sanitize_reason`（覆盖 `MUSIC_U`、Bearer、URL userinfo、签名 query）；`weapi` 异常链不再携带明文；凭据文件写入补 `fsync`。
+- `doctor` 的 `proxy_password` / `client_secret` / `auth_token` 等带前缀键也会脱敏（旧正则 `\b` 因 `_` 是词字符而漏匹配）。
+- **规则抓取**：超时归类为 `RuleError`（同时保留 `TransportError` 语义），额外页超时/重定向不再被静默吞掉，取消照常传播。
+- **远程规则下载**（`plugins/rule/remote.py`）：拒绝私网/回环/link-local/云元数据与非规范数值 host，字面 IP 必须全球可路由，域名先 `getaddrinfo` 预检，重定向复检并拒绝 `https -> http`，响应体硬上限 1 MiB。
+- **媒体音频整批预算已存在**：单曲 `MAX_TRACK_BYTES` 1 GiB、整批 `MAX_BATCH_BYTES` 8 GiB（`apps/music/downloader.py`，`DownloadOptions` 可覆盖，CLI 暂无开关）。
+
+### 发布工具
+
+- `release.py --allow-tag-content-equal`：允许内容一致（tree 相同、SHA 不同）的远端 tag，配合 API 重放推送。
+- `git ls-remote` 不可达时经 REST 查询 tag；截断响应按网络错误重试；非 ASCII 路径用 `ls-tree -z` 避免 C 引号化。
+
+---
+
+## 2. 五分钟上手
 
 | 项 | 值 |
 | --- | --- |
@@ -59,7 +106,7 @@ cd android
 
 ---
 
-## 2. 收尾流水线（用户已授权全自动）
+## 3. 收尾流水线（用户已授权全自动）
 
 按 `AGENTS.md`：门禁 → 提交 → 推送；`website/` 变了 → `scripts/deploy_site.py` + curl 逐字节校验；版本号变了 → `scripts/release.py`。
 
@@ -95,12 +142,11 @@ cd android
 ### 自动更新（桌面）
 
 - 安装形态：`updater.detect_install_shape()` → `installer` / `portable` / `source`；资产选择据此优先 setup 或 zip
-- 安装版：setup + `/SILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS`，Inno 原地覆盖，用户数据在 `%LOCALAPPDATA%
-ovel_downloader` 不受影响
+- 安装版：setup + `/SILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS`，Inno 原地覆盖，用户数据在 `%LOCALAPPDATA%\novel_downloader` 不受影响
 - 便携版：zip 覆盖当前文件夹，由 `_apply_portable_update.ps1` 在主进程退出后解压并重启；需要 PowerShell（Win10/11 自带）
 - 下载：`download_update_async` + `update_download_state` 提供字节进度；`download_asset(resume=True, attempts=3)` 支持 Range 续传
 - 清理：`updates/` 里 `.part` 1 天、安装包/zip 7 天后自动删除
-- 仍是未启用状态：清单签名（`TRUSTED_UPDATE_KEYS` 为空）。启用后必须每次都发布 `latest.json`，且私钥丢失会导致无法再签新清单
+- 仍是未启用状态：清单签名（Python `updater.TRUSTED_UPDATE_KEYS` 与 Android `ManifestSignature.TRUSTED_UPDATE_KEYS` 都为空）。启用后必须每次都发布 `latest.json`，且私钥丢失会导致无法再签新清单；详见 §6 第 1 条。
 
 ### 搜索可解释性与确定性（v1.30）
 
@@ -148,7 +194,7 @@ ovel_downloader` 不受影响
 
 ---
 
-## 3. 代码地图
+## 4. 代码地图
 
 | 需求 | 位置 |
 | --- | --- |
@@ -157,6 +203,11 @@ ovel_downloader` 不受影响
 | 聚合搜索 | `plugins/search.py`（`_search_one` 每站点硬截止、`_abandon` 不等待取消） |
 | 任务队列 + 持久化 | `apps/core/task_manager.py` |
 | 桌面桥 + 前端 | `apps/desktop/webview_app.py`、`web_assets.py`（单文件 HTML/CSS/JS） |
+| 桌面窗口几何 | `apps/desktop/window_state.py`（`clamp_geometry` / `visible_origin` / 节流保存）；屏幕 bounds 只在 `webview_app._virtual_screen_rect()` 的 Windows 分支可取 |
+| 条件请求 | `apps/common/conditional_get.py`（`ETAG_ENDPOINTS` / `ETAG_MAX_BODY_BYTES`）；`apps/api/middleware.py:ConditionalGetMiddleware`；embedded 内联同一套规则 |
+| 运维诊断 | `apps/cli/commands/doctor.py`（只读检查 + `--fix` 可逆修复） |
+| 规则引擎 | `plugins/rule/`（`model.py` 加载期校验、`remote.py` 远程规则下载、`fetcher.py` 抓取） |
+| 音乐序列化/脱敏 | `apps/music/serialize.py`（`redact_credentials` / `redact_headers` / `sanitize_reason`） |
 | Android 独立引擎 | `apps/embedded/server.py`（stdlib HTTP，路由必须镜像 REST） |
 | REST API | `apps/api/routes.py` + `schemas.py` |
 | 音乐引擎 | `apps/music/`（`providers/musicdl.py` 包装 vendored 平台） |
@@ -176,7 +227,7 @@ ovel_downloader` 不受影响
 
 ---
 
-## 4. 最近几轮做了什么（避免重复劳动）
+## 5. 历史加固与踩坑（避免重复劳动）
 
 ### 番茄完全匿名可用
 
@@ -233,28 +284,63 @@ ovel_downloader` 不受影响
 - 单文件 `web_assets.py`：设计令牌、壳、控件、卡片、音乐、Toast、弹窗都在这里。
 - 结果卡片有封面 + 首字回落；队列行有 2px 状态色条；支持 `prefers-reduced-motion`。
 - **DOM id / `data-*` / 桥接方法名是测试契约**，重构不要改；结构断言在 `tests/apps/test_desktop_app.py`。
-- 窗口几何恢复按当前显示器裁剪（`window_state.clamp_geometry(geometry, bounds)`）；多显示器负坐标保留。
+- 窗口几何存在 `desktop_prefs.json`（旧版 `window_state.json` 会自动迁移）；Windows 下用虚拟桌面/主屏 bounds 把尺寸压进屏幕、把出屏原点挪回，卸载显示器后回主屏居中；非 Windows 无 bounds，只保证最小尺寸（见 §6）。
 
 ---
 
-## 5. 已知缺口（按优先级）
+## 6. 已知遗留与下一步（按优先级）
 
-1. **Android 仍无真机验证**：本机没有 emulator/adb，SAF 自定义下载目录、音乐落盘公共 Downloads、通知点按、后台任务恢复都只有编译/单测保证。有设备后按 §9 逐项复核。
-2. **许可证待定**：`LICENSE` 是 MIT，官网/历史文案出现过 Apache-2.0；统一口径前先问用户。
-3. **API 限流是单进程内存态**：多 worker uvicorn 下每个 worker 各有一份预算（实际约为 N 倍），异步任务与 429 冷却也不跨进程；要严格全局限流需外置存储或网关。
-4. **媒体音频无总大小上限**：单响应/单文件有限制，但没有整批下载的总量预算，异常源可把磁盘打满。
-5. **重型平台已打包，但仍受账号/DRM 限制**：`aigpy`（TIDAL）、`ytmusicapi`（YouTube Music）、`pywidevine`（Apple Music / SoundCloud）已进 extras、PyInstaller 与 Chaquopy，平台数 24 → 28
-   - TIDAL 必须先在「平台凭据」配置账号 token，否则搜索会提示「需要先配置账号信息」
-   - Apple Music / SoundCloud 的 DRM 解密需要用户自备 CDM（`.wvd`），SoundCloud HLS 还需要外部 `N_m3u8DL-RE`；**只打包依赖不等于能解密**
-   - 歌词转写（`faster_whisper`）仍然不打包：模型 + ctranslate2 有数百 MB，且只影响「无歌词时自动转写」，不影响搜索/下载
-6. **SQLite 每章提交仍在事件循环上**（`storage_batch_size=1`）。连接有线程亲和性，改 `to_thread` 要 `check_same_thread=False` + 锁，风险 > 收益，暂缓。
-7. **作者查询会丢掉无作者字段的行**：相关性过滤对 `author=""` 且书名不含关键词的行打 0 分，实测会少 1-2 个来源胶囊；若要补偿，需产品决策。
-8. **旧文档/截图**：`docs/assets/images/` 里部分截图来自已删除的 NiceGUI Web UI，可能与现状不符；不要拿它们当验收依据。
-9. **8 个站点在本机被 DNS 污染**（mangg_net / dxmwx / esjzone / kadokado / syosetu / westnovel / westnovel_sub / yodu）：外部网络核实站点存活、解析正确，本机需换网络或代理才能搜到。
+1. **更新清单签名仍未启用（桌面 / CLI / Android 三处机制都已就绪）**
+   - Python：`apps/common/updater.py` 的 `TRUSTED_UPDATE_KEYS` 是空 `Mapping`；Android：`data/ManifestSignature.kt` 的 `TRUSTED_UPDATE_KEYS = emptyMap()`，且测试锁定它必须为空（`ManifestSignatureTest` / `ManifestVerificationTest`）。
+   - 当前信任锚是 HTTPS + 每个资产的 SHA-256；未签名清单照常接受。启用后，未签名 / 未知 `key_id` / 签名不符一律拒绝，且**不回退** GitHub API（否则删掉清单即可绕过），因此每次发布都必须带 `latest.json`；私钥丢失就无法再签新清单。
+   - 启用步骤见 `AGENTS.md` 与 `docs/guide/update-signing.md`；需要用户决定是否现在启用。
+
+2. **Android `device-transfer` 未排除（目前是有意策略）**
+   - `android/app/src/main/res/xml/data_extraction_rules.xml` 只写了 `<cloud-backup>` 排除（含 `device_root/file/database/sharedpref`），**没有** `<device-transfer>` 段；`backup_rules.xml`（Android 11-）也只排除云备份。
+   - 含义：D2D 换机迁移会把 API key（DataStore）、`engine_home/settings.toml`、站点 cookies/登录态、音乐 `session.json` / `platform_creds.json` 带到用户自己的新设备。文件注释写明这是预期行为（不是云副本）。
+   - 若要收紧：加 `<device-transfer><exclude domain=... path="."/></device-transfer>`，同步 `backup_rules.xml` 的语义、`AndroidSecurityConfigTest` 与隐私文案。
+
+3. **非 Windows 平台不做窗口屏外校正**
+   - `webview_app._virtual_screen_rect()` / `_primary_screen_rect()` 在 `sys.platform != "win32"` 时返回 `None`；`restore_window_state` 于是只套最小尺寸，保存的 `x`/`y` 原样使用。
+   - 后果：macOS/Linux 上换了显示器布局、窗口完全出屏时不会自动回主屏，只能手动移动，或按 `docs/guide/troubleshooting.md` 的「重置方法」删掉 `desktop_prefs.json` 里的 5 个 `window_*` 键（当前版本没有设置页重置按钮；文件在 `%LOCALAPPDATA%\novel_downloader\music\`，或 `NOVEL_MUSIC_HOME` 指定的目录）。要支持需各平台自己的屏幕枚举 API。
+
+4. **规则引擎有意允许私网地址，残余 SSRF / DNS rebinding 风险**
+   - 执行期（`plugins/rule/model.py` 的 `url_safety`）**不**拒绝 `127.0.0.1`、局域网和 link-local：自建书源、局域网镜像、本地测试站点都是合法用法。
+   - 只有**远程规则下载**（`sources add --url` / `plugins/rule/remote.py`）走严格公网策略：字面 IP 必须 `is_global`，域名先 `getaddrinfo` 预检，拒绝 `localhost`/`*.local`/`*.internal`/元数据主机与非规范数值 host，重定向复检、拒绝 `https -> http`、1 MiB 上限。
+   - 残余：预检 DNS 与实际连接不钉死（rebinding）；普通书源抓取只校验初始 URL，HTTP 客户端自行跟随重定向，**不逐跳**检查私网目标；校验与请求之间还有 TOCTOU。
+   - 结论：**安装来路不明的规则 = 允许它访问你能访问的内网和本机回环管理接口**；信任边界是规则来源，不是客户端 SSRF 检查。详见 `docs/guide/rule-dsl.md` §私网与回环。
+
+5. **API 条件请求范围很窄**
+   - 只有 `GET /api/v1/sites`、`/history`、`/music/platforms` 三个端点参与（`apps/common/conditional_get.py:ETAG_ENDPOINTS`）；响应体 > **512 KiB** 不生成 `ETag`。
+   - `/tasks*`（含 SSE）、`/login*`、`/music/jobs*`、`/downloads` 及其余端点都不发 validator。扩大范围要同时改 REST / embedded 与契约测试。
+
+6. **Linux（以及 macOS）没有发布资产**
+   - `scripts/release.py` 只构建/上传 Windows 桌面、CLI、API 与 Android APK；`.github/workflows/release.yml` 也只跑 `windows-latest`。`scripts/build_release.py` 能生成 `linux-*` 平台标签，但仓库没有 Linux 构建机或发布步骤。
+   - 官网「runs wherever Python 3.11+ runs」指**源码运行**，不是可下载的打包产物；不要据此承诺 Linux 安装包。
+
+7. **Android 仍无真机验证**：本机 `adb` 不在 PATH、也没有 emulator，SAF 自定义下载目录、音乐落盘公共 Downloads、通知点按、后台任务恢复都只有编译/单测保证。有设备后按 §10 逐项复核。
+
+8. **许可证口径不一致**：`LICENSE` 是 MIT；`website/index.html` 的 JSON-LD、hero、FAQ 与页脚（含 `404.html`）写 **Apache-2.0**。统一口径前先问用户，不要单方面改任一侧。
+
+9. **API 限流是单进程内存态**：`RateLimitMiddleware` 每个进程一份滑窗；`novel-api` 自身只起一个进程（uvicorn 拒绝 `workers > 1`），但手写 `uvicorn --workers N` 部署会得到约 N 倍预算，任务与 429 冷却也不跨进程。严格全局限流需外置存储或网关。
+
+10. **重型音乐平台已打包，但仍受账号/DRM 限制**：`aigpy`（TIDAL）、`ytmusicapi`（YouTube Music）、`pywidevine`（Apple Music / SoundCloud）已进 extras、PyInstaller 与 Chaquopy。
+    - TIDAL 必须先在「平台凭据」配置账号 token，否则搜索提示「需要先配置账号信息」。
+    - Apple Music / SoundCloud 的 DRM 解密需要用户自备 CDM（`.wvd`），SoundCloud HLS 还需要外部 `N_m3u8DL-RE`；**打包依赖不等于能解密**。
+    - 歌词转写（`faster_whisper`）不打包：模型 + ctranslate2 有数百 MB，只影响「无歌词时自动转写」。
+    - 音频单曲 1 GiB / 整批 8 GiB 上限是常量（`apps/music/downloader.py`），CLI 没有调参开关。
+
+11. **SQLite 每章提交仍在事件循环上**（默认 `storage_batch_size=1`）。连接有线程亲和性，改 `to_thread` 要 `check_same_thread=False` + 锁，风险 > 收益，暂缓。
+
+12. **作者查询会丢掉无作者字段的行**：quality 排序的相关性过滤（`min_relevance=0.45`）对 `author=""` 且书名不含关键词的行打 0 分，实测会少 1-2 个来源胶囊；补偿需产品决策。
+
+13. **旧文档/截图**：`docs/assets/images/` 里部分截图来自已删除的 NiceGUI Web UI，可能与现状不符；不要拿它们当验收依据。
+
+14. **8 个站点在本机被 DNS 污染**（mangg_net / dxmwx / esjzone / kadokado / syosetu / westnovel / westnovel_sub / yodu）：外部网络核实站点存活、解析正确，本机需换网络或代理才能搜到。
 
 ---
 
-## 6. 视觉验收方法（不依赖真机）
+## 7. 视觉验收方法（不依赖真机）
 
 Chromium 路径：
 
@@ -282,17 +368,17 @@ C:\Users\lingy\AppData\Local\ms-playwright\chromium-1228\chrome-win64\chrome.exe
 
 ---
 
-## 7. 容易踩的测试坑
+## 8. 容易踩的测试坑
 
 - `tests/apps/test_contract_parity.py`：REST 与内嵌路由一一对应；音乐端点必须真实存在（不是桩）。
 - `tests/test_i18n_coverage.py`：`t()` 的每个 msgid 都要有非空、非 fuzzy 的 zh_CN 翻译。
 - `tests/apps/test_desktop_app.py`：断言 HTML 结构、桥接方法名和若干 JS 片段（如 `if (st.error) throw new Error(st.error);`）。改模板先跑这套。
 - 测试必须 hermetic：`NOVEL_HOME` 指到 tmp；不要依赖 cwd 里有某个文件（历史上踩过）。
-- 全量本机约 8 分钟（12500+ 用例）；先跑局部测试再跑全量。
+- 全量本机约 9 分钟（v1.38.1 实测 15173 passed / 64 skipped）；先跑局部测试再跑全量。Android 侧 `cd android && ./gradlew.bat testDebugUnitTest --no-daemon --console=plain`（58 类 / 768 用例）。
 
 ---
 
-## 8. 用户偏好与边界
+## 9. 用户偏好与边界
 
 - 要求**一口气做完、不要问**，能查证就自己查证；token 充足。
 - 逆向那两个番茄客户端包是**作者授权**的（用户原话：都是 linuxdo 的佬友）。
@@ -303,7 +389,7 @@ C:\Users\lingy\AppData\Local\ms-playwright\chromium-1228\chrome-win64\chrome.exe
 
 ---
 
-## 9. 快速冒烟
+## 10. 快速冒烟
 
 ```bash
 # 番茄搜索（免登录、App 接口）
@@ -328,11 +414,12 @@ curl -s http://43.165.170.43/noveldl/index.html -o /tmp/live.html && cmp /tmp/li
 
 ---
 
-## 10. 下一步建议
+## 11. 下一步建议
 
-如果用户没有新指示，按 §5 的顺序推进：
+如果用户没有新指示，按 §6 的顺序推进：
 
-1. 用真机验证 Android：SAF 选目录 → 搜索 → 下载 → 确认落盘；再验证音乐下载、通知与任务恢复。
-2. 处理许可证文案不一致（先问用户是 MIT 还是 Apache-2.0）。
-3. 决定多 worker 限流的部署口径（单 worker 运行或接外置限流）。
-4. 评估媒体音频整批总量上限（按书/按任务/按天，先定产品规则）。
+1. 问用户是否启用更新清单签名：生成密钥对、填 `TRUSTED_UPDATE_KEYS`（Python + Android 两份）、发版带 `--sign-key`；启用后每次发布都必须有 `latest.json`，私钥需离线备份。
+2. 用真机验证 Android：SAF 选目录 → 搜索 → 下载 → 确认落盘；再验证音乐下载、通知、任务恢复、换机迁移（`device-transfer` 当前会把凭据带过去，需确认是否符合预期）。
+3. 处理许可证文案不一致（先问用户是 MIT 还是 Apache-2.0，再统一 `LICENSE`、官网 JSON-LD/页脚/FAQ 与文档）。
+4. 决定是否扩大条件请求范围（目前仅 3 个端点，512 KiB 上限）或给 Linux 出构建/发布流程。
+5. 决定多 worker 限流的部署口径（`novel-api` 保持单进程，或接外置限流）。
