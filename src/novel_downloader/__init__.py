@@ -6,7 +6,7 @@ novel_downloader
 A toolkit for downloading and processing novels.
 """
 
-__version__ = "1.38.1"
+__version__ = "1.39.0"
 
 __author__ = "lingyi-ling"
 __license__ = "MIT"

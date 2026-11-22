@@ -1,3 +1,25 @@
+## v1.39.0 (2026-11-22)
+
+桌面窗口重置、OpenAPI 文档质量与扫描/下载分类强化。
+
+### Feature
+
+- **桌面窗口重置**：设置页新增「重置窗口位置与大小」，只删五个 `window_*` 偏好，当前窗口不移动、下次启动生效；重置后本次运行停止写回几何
+- **OpenAPI**：补 `servers`、关键端点请求/响应示例、304 空体示例，以及 400/413/415/500/503/504 响应声明；修正 422 `HTTPValidationError` 为服务端真实形状
+- **密钥扫描**：新增 URL userinfo、Slack/Discord webhook、JWT 规则；`.env`/`.ini`/`.toml`/`.yaml` 中未加引号的值按数据处理；支持带前缀的凭据键与 UTF-16 BOM
+- **Android 下载失败**：补 `ERROR_DEVICE_NOT_FOUND` 文案与全部 `COLUMN_REASON` 分类；provider 原生 `SecurityException` 归为权限并回退系统 Downloads；HTTP 状态用 `DownloadHttpException` 携带
+
+### Docs
+
+- HANDOFF 刷新至 v1.39.0（能力面、遗留、下一步）
+- 发布流程新增「tag 指向重放提交」续跑步骤
+
+### Test
+
+- Python **15280 passed / 64 skipped**；ruff/format、mypy 全绿
+- Android 全量单测 781 用例、`lintDebug` 通过
+- 新增扫描器矩阵、OpenAPI 示例校验、窗口重置、Android 下载失败分类测试
+
 ## v1.38.1 (2026-11-22)
 
 补丁版：凭据脱敏、重试与诊断契约。
