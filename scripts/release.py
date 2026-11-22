@@ -1874,6 +1874,11 @@ def head_tree_sha(repo_root: Path) -> str | None:
     return _git_stdout(repo_root, ["rev-parse", "HEAD^{tree}"])
 
 
+def commit_tree_sha(repo_root: Path, rev: str) -> str | None:
+    """The tree object reachable from *rev*, or ``None`` when unresolvable."""
+    return _git_stdout(repo_root, ["rev-parse", f"{rev}^{{tree}}"])
+
+
 def tag_exists_local(repo_root: Path, tag: str) -> bool:
     """Whether *tag* already exists in the local repository."""
     return local_tag_commit(repo_root, tag) is not None
@@ -2617,7 +2622,8 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
     remote_sha = remote_tag_commit(repo_root, tag)
     client = GitHubClient(slug, token, api_base=args.api_base)
     content_equal_ok = bool(args.allow_tag_content_equal and args.skip_build)
-    if remote_sha is None and content_equal_ok:
+    behind_ok = bool(args.allow_tag_behind and args.skip_build)
+    if remote_sha is None and (content_equal_ok or behind_ok):
         # ``git ls-remote`` needs github.com:443, which is exactly what is
         # usually blocked when this flag matters.  Ask the REST API instead of
         # assuming the tag is absent: without this the run would try to recreate
@@ -2641,7 +2647,7 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
         # both trees so the caller can prove content equality instead of
         # trusting the flag alone.
         remote_tree = client.get_commit_tree(remote_sha)
-        head_tree = head_tree_sha(repo_root)
+        head_tree = commit_tree_sha(repo_root, local_sha or head_sha or "HEAD")
     verify_tag_target(
         tag,
         local_sha=local_sha,
