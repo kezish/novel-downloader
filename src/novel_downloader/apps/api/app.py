@@ -104,6 +104,7 @@ from novel_downloader.infra.config import get_config_value
 
 from .auth import require_token
 from .middleware import (
+    BODY_LIMIT_METHODS,
     DEFAULT_MAX_BODY_BYTES,
     DEFAULT_RATE_LIMIT,
     DEFAULT_RATE_LIMIT_MAX_KEYS,
@@ -121,6 +122,14 @@ from .middleware import (
     RequestLoggingMiddleware,
     SecurityHeadersMiddleware,
     register_error_handlers,
+)
+from .openapi_examples import (
+    ERROR_EXAMPLES,
+    EXTRA_ERROR_RESPONSES,
+    GLOBAL_ERROR_DESCRIPTIONS,
+    OPENAPI_SERVERS,
+    REQUEST_EXAMPLES,
+    RESPONSE_EXAMPLES,
 )
 from .routes import OPENAPI_TAGS, router, task_to_dict
 from .webhook import (
@@ -502,6 +511,137 @@ def _install_conditional_get_metadata(schema: dict[str, Any]) -> None:
             parameters.append({"$ref": _IF_NONE_MATCH_PARAMETER_REF})
 
 
+def _error_body_response(description: str) -> dict[str, Any]:
+    """Return one JSON error response carrying the shared ``detail`` shape."""
+    return {
+        "description": description,
+        "content": {"application/json": {"schema": dict(_ERROR_DETAIL_SCHEMA)}},
+    }
+
+
+def _install_validation_error_schema(schema: dict[str, Any]) -> None:
+    """
+    Point the documented ``422`` component at the shape the handler returns.
+
+    FastAPI advertises its stock ``HTTPValidationError`` (``detail`` as an
+    array of Pydantic entries), but
+    :func:`novel_downloader.apps.api.middleware.register_error_handlers`
+    renders ``{"detail": <sentence>, "errors": [...]}``: a single readable
+    string plus the machine-readable list. Keeping the component name (and
+    therefore every ``$ref``) preserves the name generated clients already
+    import; only the property list is corrected so the ``422`` example can be
+    validated against it. ``ValidationError`` stays reachable through
+    ``errors`` when FastAPI emitted it.
+    """
+    schemas = schema.setdefault("components", {}).setdefault("schemas", {})
+    properties: dict[str, Any] = {
+        "detail": {
+            "type": "string",
+            "description": (
+                "Human-readable sentence combining every validation failure, "
+                "for example 'Request validation failed: keyword: ...'."
+            ),
+        }
+    }
+    if "ValidationError" in schemas:
+        properties["errors"] = {
+            "type": "array",
+            "description": "Machine-readable Pydantic validation entries.",
+            "items": {"$ref": "#/components/schemas/ValidationError"},
+        }
+    schemas["HTTPValidationError"] = {
+        "title": "HTTPValidationError",
+        "type": "object",
+        "properties": properties,
+        "required": ["detail"],
+    }
+
+
+def _install_error_response_metadata(schema: dict[str, Any]) -> None:
+    """
+    Document the error responses the middleware and handlers can produce.
+
+    FastAPI's document only knows the responses the router declares, so the
+    body-size guard's ``413`` / ``415`` (write methods only), the catch-all
+    ``500`` and the per-endpoint ``400`` / ``503`` / ``504`` would be invisible
+    to generated clients. The shared validation component is corrected here
+    too. Headers are *not* stamped yet: the generic pass in
+    :func:`_install_openapi_metadata` adds the correlation id to every
+    response afterwards, so these entries get it like any other.
+    """
+    _install_validation_error_schema(schema)
+
+    for path, path_item in schema.get("paths", {}).items():
+        if not isinstance(path_item, dict):
+            continue
+        for method, operation in path_item.items():
+            if method not in _OPENAPI_HTTP_METHODS or not isinstance(operation, dict):
+                continue
+            responses = operation.setdefault("responses", {})
+            responses.setdefault(
+                "500", _error_body_response(GLOBAL_ERROR_DESCRIPTIONS[500])
+            )
+            if method.upper() in BODY_LIMIT_METHODS:
+                for status in (413, 415):
+                    responses.setdefault(
+                        str(status),
+                        _error_body_response(GLOBAL_ERROR_DESCRIPTIONS[status]),
+                    )
+            for status, description in EXTRA_ERROR_RESPONSES.get(
+                (path, method), {}
+            ).items():
+                responses.setdefault(str(status), _error_body_response(description))
+
+
+def _install_example_metadata(schema: dict[str, Any]) -> None:
+    """
+    Attach the request/response examples and the ``servers`` entry.
+
+    Request examples go on the media type of the generated ``requestBody``;
+    response examples are merged per status so a generic error value (401,
+    413, 415, 422, 429, 500, 503) and an endpoint-specific one (e.g. the
+    music-jobs ``429``) can coexist under distinct names. Every value comes
+    from :mod:`novel_downloader.apps.api.openapi_examples` and is validated
+    against the schema it is attached to by ``tests/apps/
+    test_openapi_examples.py``.
+    """
+    schema.setdefault("servers", [dict(server) for server in OPENAPI_SERVERS])
+
+    paths = schema.get("paths", {})
+    for (path, method), examples in REQUEST_EXAMPLES.items():
+        path_item = paths.get(path)
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        if not isinstance(operation, dict):
+            continue
+        media = (
+            operation.get("requestBody", {}).get("content", {}).get("application/json")
+        )
+        if isinstance(media, dict):
+            media.setdefault("examples", {}).update(
+                {name: dict(entry) for name, entry in examples.items()}
+            )
+
+    for path, path_item in paths.items():
+        if not isinstance(path_item, dict):
+            continue
+        for method, operation in path_item.items():
+            if method not in _OPENAPI_HTTP_METHODS or not isinstance(operation, dict):
+                continue
+            for code, response in operation.get("responses", {}).items():
+                if not isinstance(response, dict):
+                    continue
+                media = response.get("content", {}).get("application/json")
+                if not isinstance(media, dict):
+                    continue
+                collected: dict[str, Any] = {}
+                generic = ERROR_EXAMPLES.get(str(code))
+                if generic is not None:
+                    collected["default"] = dict(generic)
+                collected.update(RESPONSE_EXAMPLES.get((path, method, str(code)), {}))
+                if collected:
+                    media.setdefault("examples", {}).update(collected)
+
+
 def _install_openapi_metadata(application: FastAPI) -> None:
     """
     Augment the generated document with cross-cutting API metadata.
@@ -512,9 +652,13 @@ def _install_openapi_metadata(application: FastAPI) -> None:
     documents the optional ``X-Request-ID`` request header and its echoed
     response header on every operation, declares the conditional-request
     contract (``If-None-Match`` / ``ETag`` / ``304``) on the cacheable
-    reference endpoints, and removes the ``429`` response from paths the rate
-    limiter exempts. The schema is otherwise produced from the routes, so it
-    stays in sync with the router automatically.
+    reference endpoints, documents the middleware-produced error responses
+    (``413`` / ``415`` / ``500`` and the per-endpoint ``400`` / ``503`` /
+    ``504``), attaches the request/response examples and the local ``servers``
+    entry from :mod:`novel_downloader.apps.api.openapi_examples`, and removes
+    the ``429`` response from paths the rate limiter exempts. The schema is
+    otherwise produced from the routes, so it stays in sync with the router
+    automatically.
 
     The header parameter deliberately has no ``pattern`` or ``maxLength``:
     unsafe values are replaced by a generated id rather than rejected, so a
@@ -556,6 +700,11 @@ def _install_openapi_metadata(application: FastAPI) -> None:
         # Declared before the generic response pass so the new 304 also gets
         # the X-Request-ID header like every other documented response.
         _install_conditional_get_metadata(schema)
+        # Error responses first: the example pass then attaches a value to
+        # every response, and the generic pass below stamps the correlation id
+        # header onto the new entries too.
+        _install_error_response_metadata(schema)
+        _install_example_metadata(schema)
 
         for path, path_item in schema.get("paths", {}).items():
             if not isinstance(path_item, dict):
