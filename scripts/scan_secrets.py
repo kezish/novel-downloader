@@ -26,11 +26,26 @@ Rules
 ``bearer-token``
     A literal ``Bearer`` credential longer than a header placeholder.
 
+``url-userinfo``
+    A literal ``scheme://user:password@host`` whose password is long enough
+    to be a credential rather than a placeholder.
+
+``webhook-url``
+    Slack and Discord incoming-webhook URLs.  The URL itself is the secret;
+    most of these URLs cannot be revoked without replacing the whole hook.
+
+``jwt``
+    A three-part base64url JSON Web Token (header and payload both begin
+    with ``eyJ``, the base64url encoding of ``{"``).
+
 ``generic-secret``
     A quoted or literal value assigned to a credential-shaped key
     (``password``, ``secret``, ``token``, ``api_key``, ...).  Values that
     name an environment variable, a config attribute or a documented
-    placeholder are ignored.
+    placeholder are ignored.  In dotenv/INI/TOML/YAML files the right-hand
+    side is data rather than code, so a bare word is treated as the literal
+    value instead of an identifier reference (``API_KEY`` with an unquoted
+    ``sk_live_...`` value is a leak, not an expression).
 
 ``sensitive-file``
     A tracked keystore or SSH private key file name (``*.jks``, ``*.keystore``,
@@ -42,6 +57,8 @@ Only files known to Git are read (``git ls-files``), so ignored build output
 and local credential files are out of scope.  Binary files, files without a
 known text extension and files above :data:`MAX_FILE_BYTES` are skipped;
 keystore file names are still reported because the name alone is the finding.
+UTF-16 files that carry a BOM are decoded as UTF-16 before the binary probe;
+GBK/other legacy encodings still match because credential shapes are ASCII.
 
 History
 -------
@@ -74,6 +91,7 @@ Exit codes
 from __future__ import annotations
 
 import argparse
+import codecs
 import fnmatch
 import json
 import re
@@ -172,6 +190,25 @@ TEXT_NAMES = frozenset(
         "Dockerfile",
         "Makefile",
         "gradlew",
+    }
+)
+
+#: Formats whose right-hand side is a literal value instead of a code
+#: expression.  An unquoted ``API_KEY`` value in a dotenv file is the secret
+#: itself, while the same name assigned from ``key.name`` in Python is a
+#: reference; the generic rule uses this distinction so unquoted config
+#: secrets are not missed.
+CONFIG_SUFFIXES = frozenset(
+    {
+        ".cfg",
+        ".conf",
+        ".env",
+        ".ini",
+        ".properties",
+        ".tfvars",
+        ".toml",
+        ".yaml",
+        ".yml",
     }
 )
 
@@ -283,16 +320,43 @@ RULES = (
         re.compile(r"(?i)\bBearer\s+(?P<value>[A-Za-z0-9._~+/=-]{20,})"),
     ),
     Rule(
+        "url-userinfo",
+        re.compile(
+            r"(?i)\b[a-z][a-z0-9+.-]{1,15}://[^\s:/@]+:"
+            r"(?P<value>[^\s/@]{8,})@"
+        ),
+    ),
+    Rule(
+        "webhook-url",
+        re.compile(
+            r"(?i)https://(?:"
+            r"hooks\.slack\.com/(?:services|workflows|triggers)/"
+            r"|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{5,}/"
+            r")(?P<value>[A-Za-z0-9/_-]{20,})"
+        ),
+    ),
+    Rule(
+        "jwt",
+        re.compile(
+            r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}"
+            r"\.[A-Za-z0-9_-]{8,}"
+        ),
+    ),
+    Rule(
         "generic-secret",
         re.compile(
             r"(?i)\b(?P<key>"
-            r"password|passwd|pwd|"
+            # An optional ``SCREAMING_PREFIX_`` / ``vendor.`` namespace.  A
+            # bare ``\b`` would miss ``DB_PASSWORD`` and
+            # ``POSTGRES_PASSWORD`` because ``_`` is a word character.
+            r"(?:[A-Za-z0-9]+[_.-])*"
+            r"(?:password|passwd|pwd|"
             r"secret|client[_-]?secret|secret[_-]?key|"
             r"token|access[_-]?token|auth[_-]?token|refresh[_-]?token|"
             r"api[_-]?key|apikey|x[_-]?api[_-]?key|"
             r"access[_-]?key(?:[_-]?id)?|"
             r"aws[_-]?secret[_-]?access[_-]?key|"
-            r"private[_-]?key"
+            r"private[_-]?key)"
             r")\b[\"']?\s*[:=]\s*(?P<quote>[\"']?)"
             r"(?P<value>[^\s\"'#;,)\]}{]{8,})(?P=quote)"
         ),
@@ -306,11 +370,12 @@ RULES = (
 ALLOWLIST: tuple[tuple[str, frozenset[str], str], ...] = (
     (
         # Fixtures deliberately contain fake credentials ("secret-token",
-        # "Bearer ...") to exercise redaction and auth code.  Only the two
-        # heuristic rules are relaxed: a private key, AWS/GitHub/Slack token
-        # or keystore inside tests/ is still reported.
+        # "Bearer ...", proxy URLs with a synthetic password) to exercise
+        # redaction and auth code.  Only the heuristic rules are relaxed: a
+        # private key, AWS/GitHub/Slack token, JWT, webhook or keystore inside
+        # tests/ is still reported.
         "tests/*",
-        frozenset({"generic-secret", "bearer-token"}),
+        frozenset({"generic-secret", "bearer-token", "url-userinfo"}),
         "test fixtures contain synthetic credentials",
     ),
     (
@@ -324,12 +389,13 @@ ALLOWLIST: tuple[tuple[str, frozenset[str], str], ...] = (
         "instrumentation fixtures contain synthetic credentials",
     ),
     (
-        # Upstream musicdl publishes these third-party app ids/secrets in its
-        # source; they are not this project's credentials.  Only the generic
-        # assignment rule is relaxed here -- private keys and provider tokens
-        # are still reported inside the vendored tree.
+        # Upstream musicdl publishes these third-party app ids/secrets and
+        # anonymous web tickets in its source; they are not this project's
+        # credentials.  Only the heuristic assignment rule and the
+        # upstream-hardcoded ticket JWT are relaxed here -- private keys and
+        # provider tokens are still reported inside the vendored tree.
         "src/novel_downloader/apps/music/providers/_vendor/musicdl/*",
-        frozenset({"generic-secret"}),
+        frozenset({"generic-secret", "jwt"}),
         "vendored upstream public client constants",
     ),
     (
@@ -435,6 +501,11 @@ def _decode(data: bytes) -> str | None:
     """Decode a text file, or return ``None`` for binary/oversized content."""
     if len(data) > MAX_FILE_BYTES:
         return None
+    # PowerShell 5.1 and several Windows editors write UTF-16LE with a BOM.
+    # ``.ps1``/``.bat`` are scanned text, so honour the BOM before the NUL
+    # probe would classify the whole file as binary and skip it.
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return data.decode("utf-16", "replace")
     if b"\x00" in data[:BINARY_PROBE_BYTES]:
         return None
     return data.decode("utf-8", "replace")
@@ -467,7 +538,16 @@ def _read_index(root: Path, rel_path: str) -> bytes | None:
     return result.stdout
 
 
-def _is_benign_value(value: str, quoted: bool) -> bool:
+def _is_config_literal_path(rel_path: str) -> bool:
+    """Whether assignments in *rel_path* hold data rather than code."""
+    path = Path(rel_path)
+    name = path.name.lower()
+    if name == ".env" or name.startswith(".env."):
+        return True
+    return path.suffix.lower() in CONFIG_SUFFIXES
+
+
+def _is_benign_value(value: str, quoted: bool, *, config_literal: bool = False) -> bool:
     """Decide whether an assignment value is a placeholder or a reference."""
     if PLACEHOLDER_RE.search(value):
         return True
@@ -477,6 +557,12 @@ def _is_benign_value(value: str, quoted: bool) -> bool:
         return True
     if quoted:
         return False
+    if config_literal:
+        # Dotenv/INI/TOML/YAML values are data: a bare word is the literal
+        # secret, and ``=`` is base64 padding rather than an expression.  Not
+        # applying the identifier/operator heuristics is what catches an
+        # unquoted ``sk_live_...`` value and a padded base64 value.
+        return False
     if any(char in value for char in "&=?()+[]{}"):
         # Unquoted query strings, arithmetic and subscript expressions are
         # code, not credentials; quoted base64 values are still scanned.
@@ -484,17 +570,18 @@ def _is_benign_value(value: str, quoted: bool) -> bool:
     return bool(_IDENTIFIER_RE.match(value) or _CALL_OR_SUBSCRIPT_RE.match(value))
 
 
-def _matches(rule: Rule, line: str) -> bool:
+def _matches(rule: Rule, line: str, rel_path: str = "") -> bool:
     match = rule.pattern.search(line)
     if match is None:
         return False
     if rule.name == "generic-secret":
         return not _is_benign_value(
-            match.group("value"), quoted=bool(match.group("quote"))
+            match.group("value"),
+            quoted=bool(match.group("quote")),
+            config_literal=_is_config_literal_path(rel_path),
         )
-    if rule.name == "bearer-token":
-        value = match.group("value")
-        return not PLACEHOLDER_RE.search(value)
+    if rule.name in ("bearer-token", "url-userinfo", "webhook-url"):
+        return not PLACEHOLDER_RE.search(match.group("value"))
     return True
 
 
@@ -505,7 +592,7 @@ def scan_text(rel_path: str, text: str) -> list[Finding]:
         for rule in RULES:
             if _is_allowlisted(rel_path, rule.name):
                 continue
-            if _matches(rule, line):
+            if _matches(rule, line, rel_path):
                 findings.append(Finding(rel_path, line_no, rule.name))
     return findings
 
@@ -688,7 +775,7 @@ class _HistoryScanner:
             for rule in RULES:
                 if _is_allowlisted(path, rule.name):
                     continue
-                if _matches(rule, content):
+                if _matches(rule, content, path):
                     self.findings.append(
                         HistoryFinding(commit, path, self._line, rule.name)
                     )
