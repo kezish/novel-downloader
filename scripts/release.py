@@ -82,6 +82,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
@@ -1440,6 +1441,17 @@ class GitHubClient:
                 kind = "timeout" if isinstance(exc, TimeoutError) else "network error"
                 raise TransientAPIError(
                     f"{kind} calling {method} {url}: {reason}"
+                ) from exc
+            except (http.client.HTTPException, OSError) as exc:
+                # A truncated response (``IncompleteRead``) is a network fault,
+                # not an API answer: retry it like a connection error instead
+                # of letting it escape as a traceback. ``OSError`` covers
+                # reset/aborted sockets surfaced by the TLS layer.
+                if attempt < retries:
+                    time.sleep(min(2**attempt, 10))
+                    continue
+                raise TransientAPIError(
+                    f"truncated response calling {method} {url}: {exc}"
                 ) from exc
         if status == 0:
             raise TransientAPIError(f"network error calling {method} {url}")

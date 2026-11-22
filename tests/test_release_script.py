@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import email.message
+import http.client as http_client
 import importlib.util
 import io
 import json
@@ -994,6 +995,40 @@ class TestGitHubClient:
         http.route("GET", f"/releases/tags/{TAG}", broken)
         monkeypatch.setattr(release.time, "sleep", lambda _seconds: None)
         with pytest.raises(release.TransientAPIError, match="network error"):
+            client.get_release_by_tag(TAG)
+        assert calls["n"] == 4
+
+    def test_get_retries_truncated_responses(
+        self, release: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``IncompleteRead`` is a network fault, not an API answer."""
+        client, http = self._patched(release, monkeypatch)
+        calls = {"n": 0}
+
+        def truncated() -> tuple[int, bytes]:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise http_client.IncompleteRead(b"partial", 40)
+            return 200, json.dumps(RELEASE_JSON).encode("utf-8")
+
+        http.route("GET", f"/releases/tags/{TAG}", truncated)
+        monkeypatch.setattr(release.time, "sleep", lambda _seconds: None)
+        assert client.get_release_by_tag(TAG)["id"] == 7
+        assert calls["n"] == 3
+
+    def test_truncated_response_gives_up_cleanly(
+        self, release: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client, http = self._patched(release, monkeypatch)
+        calls = {"n": 0}
+
+        def truncated() -> tuple[int, bytes]:
+            calls["n"] += 1
+            raise http_client.IncompleteRead(b"partial", 40)
+
+        http.route("GET", f"/releases/tags/{TAG}", truncated)
+        monkeypatch.setattr(release.time, "sleep", lambda _seconds: None)
+        with pytest.raises(release.TransientAPIError, match="truncated response"):
             client.get_release_by_tag(TAG)
         assert calls["n"] == 4
 
