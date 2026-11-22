@@ -2608,6 +2608,10 @@ class TestTagTarget:
             head="b" * 40,
             ancestor=False,
         )
+        # ``git ls-remote`` reports no tag (the git endpoint is down in this
+        # scenario), so the resume path asks the REST API before assuming the
+        # tag is absent. Answer 404: there is no remote tag either way.
+        http.route_404(f"/git/ref/tags/{TAG}")
 
         rc = release.main(
             [
@@ -2625,7 +2629,7 @@ class TestTagTarget:
         assert "not an ancestor of HEAD" in err
         assert "--allow-tag-behind cannot help" in err
         assert not any(command[:2] == ["git", "push"] for command in sub.commands())
-        assert http.requests == []
+        assert [request["method"] for request in http.requests] == ["GET"]
 
     def test_allow_tag_behind_requires_skip_build(
         self,
