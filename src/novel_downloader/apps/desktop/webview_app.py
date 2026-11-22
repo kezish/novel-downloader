@@ -1015,6 +1015,23 @@ def _i18n_catalog() -> dict[str, str]:
         "Light": t("Light"),
         "Dark": t("Dark"),
         "Language": t("Language"),
+        "Window": t("Window"),
+        "The window reopens at its last size and position. Resetting clears "
+        "that saved geometry; the current window stays as it is and the next "
+        "start uses the default size.": t(
+            "The window reopens at its last size and position. Resetting clears "
+            "that saved geometry; the current window stays as it is and the next "
+            "start uses the default size."
+        ),
+        "Reset window position and size": t("Reset window position and size"),
+        "Window position and size reset. It takes effect the next time the app "
+        "starts.": t(
+            "Window position and size reset. It takes effect the next time the "
+            "app starts."
+        ),
+        "Could not reset the window position and size": t(
+            "Could not reset the window position and size"
+        ),
         "Search filters": t("Search filters"),
         "The last used filters are restored when the app starts.": t(
             "The last used filters are restored when the app starts."
@@ -3206,6 +3223,9 @@ class ApiBridge:
         self._music_searches: dict[str, dict[str, Any]] = {}
         # Background task-queue restore, so window creation never waits for it.
         self._services_thread: threading.Thread | None = None
+        # Set by ``reset_window_state``: the saved geometry is gone, so this
+        # session must not write the current rectangle back on move/close.
+        self._window_state_reset = threading.Event()
 
     @property
     def _engine(self) -> AsyncEngine:
@@ -3217,6 +3237,11 @@ class ApiBridge:
             engine = AsyncEngine()
             self._engine_instance = engine
         return engine
+
+    @property
+    def window_state_save_suppressed(self) -> bool:
+        """Whether ``reset_window_state`` disabled geometry writes this run."""
+        return self._window_state_reset.is_set()
 
     def start_services(self) -> None:
         """
@@ -5167,6 +5192,30 @@ class ApiBridge:
             "error": None if ok else t("Could not save the settings"),
         }
 
+    def reset_window_state(self) -> dict[str, Any]:
+        """
+        Forget the saved window geometry (the settings-page action).
+
+        Only the five ``window_*`` preference keys are deleted; the theme, the
+        update switches and any other stored key are left untouched.  The
+        legacy ``window_state.json`` file is deliberately not removed (see the
+        settings reference).  The current window does not move immediately:
+        the default geometry applies on the next start, and this session stops
+        saving the geometry so the close handler cannot write the old
+        rectangle straight back into the freshly cleared preferences.
+
+        :return: ``{"ok", "error"}``.  Never raises.
+        """
+        from novel_downloader.apps.desktop.window_state import WINDOW_PREFS_KEYS
+
+        ok = _remove_prefs_keys(*WINDOW_PREFS_KEYS) is not False
+        if ok:
+            self._window_state_reset.set()
+        return {
+            "ok": ok,
+            "error": None if ok else t("Could not reset the window position and size"),
+        }
+
     def get_search_cache_stats(self) -> dict[str, Any]:
         """
         Read the shared search cache's diagnostics (the settings-page rows).
@@ -6969,6 +7018,10 @@ def run_webview_app() -> int:
             return WindowState(geometry_now, maximized[0])
 
     def persist(force: bool = False) -> None:
+        if bridge.window_state_save_suppressed:
+            # The user reset the geometry from the settings page; writing the
+            # current rectangle now would undo it on the next launch.
+            return
         if not throttle.allow(force=force):
             return
         current = snapshot()

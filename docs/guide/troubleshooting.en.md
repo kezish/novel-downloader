@@ -1320,12 +1320,12 @@ Monitor bounds are queried only on **Windows** (`GetSystemMetrics` for the virtu
 
 **When it is saved**: at most once per second while dragging/resizing, and immediately on maximize, restore and window close; an unchanged value is not rewritten. While maximized, the saved geometry is the **last normal (unmaximized) rectangle**, so unmaximizing returns to the previous size instead of a normal window the size of the screen. Saving is best effort: an unwritable preferences file is logged and never blocks window operations.
 
-**Resetting it (the current build has no Settings button for this)**
+**Resetting it (prefer the Settings button)**
 
-1. Quit the desktop app completely. Minimizing is not enough: closing the window writes the state once more.
-2. Find `desktop_prefs.json`: on Windows it is normally under `%LOCALAPPDATA%\novel_downloader\music\`; when `NOVEL_MUSIC_HOME` is set, that directory is used instead.
-3. In a text editor, delete `window_width`, `window_height`, `window_x`, `window_y` and `window_maximized`, leaving the other keys and valid JSON intact. Deleting only `window_x` / `window_y` makes the system choose a position but keeps the size and maximized state; deleting only `window_maximized` (or setting it to `false`) cancels just the maximized state.
-4. If `window_state.json` from an older build exists in the same directory, delete it as well. It is read only as a compatibility fallback when **none of the five `window_*` keys exists**, so leaving it behind can restore the old geometry.
+1. Open **Settings → Window** and click **Reset window position and size**. It deletes only the five `window_*` keys from `desktop_prefs.json`; the theme, update switches, search filters and every other preference stay.
+2. The current window **does not move or resize immediately**; the default `1220×800`, a window-manager-chosen position and no maximization apply on the **next start**. After a successful click the rest of this run stops saving the geometry, so closing the window cannot write the old values back.
+3. Restart the desktop app. If the window still reopens at the old position/size, check for a legacy `window_state.json` next to the preferences file: the reset button **does not delete** it, and it is read as a compatibility fallback when none of the five `window_*` keys exists. Quit the app completely, delete that file, and start it once more.
+4. For a partial reset (without deleting all five keys), quit the app completely and edit `desktop_prefs.json` by hand: on Windows it is normally under `%LOCALAPPDATA%\novel_downloader\music\`; when `NOVEL_MUSIC_HOME` is set, that directory is used instead. Deleting only `window_x` / `window_y` makes the system choose a position but keeps the size and maximized state; deleting only `window_maximized` (or setting it to `false`) cancels just the maximized state. An edit made while the app runs is overwritten when the window closes.
 5. Delete the whole `desktop_prefs.json` only if you accept resetting **every** desktop preference in it (theme, update switches, and possibly historical keys such as the proxy password); back it up first.
 6. Start the desktop app again.
 

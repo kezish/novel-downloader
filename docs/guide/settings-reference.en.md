@@ -150,7 +150,7 @@ The desktop client stores the main window's position, size and maximized state i
 
 * **When it is saved**: at most once per second while dragging/resizing; immediately on maximize, restore and window close; an unchanged value is not rewritten. While maximized, the stored rectangle is the last normal one, so unmaximizing returns to the previous size instead of leaving a normal window the size of the screen.
 * **Multiple monitors**: on Windows, start-up queries the current virtual desktop and primary-screen bounds. When the saved monitor is gone (the rectangle overlaps no monitor), the window is centred on the primary; when it is only partly off-screen, it is nudged back inside the virtual desktop; negative coordinates are not treated as invalid.
-* **Platform difference**: monitor bounds are queried only on Windows. On other platforms or when the metrics are unavailable, the stored coordinates are used as-is with no off-screen correction, so the window can open outside the screen and must be reset manually.
+* **Platform difference**: monitor bounds are queried only on Windows. On other platforms or when the metrics are unavailable, the stored coordinates are used as-is with no off-screen correction, so the window can open outside the screen and must be reset (see below).
 * **Coordinates come in pairs**: `window_x` / `window_y` are kept only when both are integers; if just one is stored (the other absent or `null`), both are discarded and the window manager chooses the position.
 * **Minimum size**: at restore time a width below `980` or height below `640` falls back to the default; the window itself also enforces `980×640` as its minimum. If the current screen is smaller than that minimum, the window can still exceed it.
 
@@ -160,12 +160,14 @@ Window geometry is **device-specific**, so it is outside the "Settings → Backu
 
 **Resetting it**
 
-The Settings page in the current build has **no** "Reset window position" button. To reset:
+The Settings page's **Window** card offers a **Reset window position and size** button, backed by the `reset_window_state` bridge method:
 
-1. Quit the desktop app completely (closing the window writes the state once more, and an edit made while it runs will be overwritten);
-2. open `desktop_prefs.json` and delete `window_width`, `window_height`, `window_x`, `window_y` and `window_maximized`, keeping the other keys and valid JSON; to cancel only maximization, delete `window_maximized` or set it to `false`; to let the system pick the position only, delete `window_x` / `window_y`;
-3. if `window_state.json` from an older build exists in the same directory, delete it as well; it is read only as a compatibility fallback when none of the five `window_*` keys exists;
-4. start the desktop app again.
+1. it deletes only the `window_width`, `window_height`, `window_x`, `window_y` and `window_maximized` keys from `desktop_prefs.json`; the theme, update switches, search filters and every other preference stay;
+2. **the current window does not move or resize immediately**. The default geometry (`1220×800`, position chosen by the window manager, not maximized) applies on the **next start**;
+3. after a successful click, the rest of this run **stops saving** the window geometry, so closing the window cannot write those five keys back and the next start really uses the defaults;
+4. the legacy `window_state.json` is **not** deleted. It is read as a compatibility fallback only when none of the five `window_*` keys exists, so if the window still reopens at the old position/size after a reset and restart, quit the app, delete that file, and start it once more.
+
+Partial resets are still possible by hand: delete only `window_maximized` (or set it to `false`) to cancel maximization; delete only `window_x` / `window_y` to let the system pick a position while keeping the size and maximized state. Quit the desktop app completely before editing (closing the window writes the state once more, and an edit made while it runs will be overwritten).
 
 Delete the whole `desktop_prefs.json` only if you accept resetting **every** desktop preference in it (theme, update switches, and possibly historical keys such as the proxy password); back it up first. For step-by-step diagnosis see [Troubleshooting § The desktop window opens off-screen or at the wrong size](./troubleshooting.en.md#desktop-window-trouble).
 

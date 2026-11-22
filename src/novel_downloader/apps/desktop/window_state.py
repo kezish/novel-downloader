@@ -36,6 +36,7 @@ __all__ = [
     "MIN_WINDOW_HEIGHT",
     "MIN_WINDOW_WIDTH",
     "SAVE_THROTTLE_SECONDS",
+    "WINDOW_PREFS_KEYS",
     "WINDOW_STATE_FILENAME",
     "SaveThrottle",
     "WindowGeometry",
@@ -81,6 +82,16 @@ _PREFS_HEIGHT = "window_height"
 _PREFS_X = "window_x"
 _PREFS_Y = "window_y"
 _PREFS_MAXIMIZED = "window_maximized"
+
+#: Every desktop-prefs key that holds window geometry.  ``reset_window_state``
+#: deletes exactly these, so a reset can never touch an unrelated preference.
+WINDOW_PREFS_KEYS: tuple[str, ...] = (
+    _PREFS_WIDTH,
+    _PREFS_HEIGHT,
+    _PREFS_X,
+    _PREFS_Y,
+    _PREFS_MAXIMIZED,
+)
 
 #: Name of the JSON file inside :func:`music_data_dir`.
 WINDOW_STATE_FILENAME = "window_state.json"
@@ -183,16 +194,7 @@ def restore_window_state(
         used when the stored origin no longer overlaps any monitor.
     :return: The restored state, or ``None`` when no window keys were stored.
     """
-    if not any(
-        key in mapping
-        for key in (
-            _PREFS_WIDTH,
-            _PREFS_HEIGHT,
-            _PREFS_X,
-            _PREFS_Y,
-            _PREFS_MAXIMIZED,
-        )
-    ):
+    if not any(key in mapping for key in WINDOW_PREFS_KEYS):
         return None
 
     width = _int_dimension(mapping.get(_PREFS_WIDTH))

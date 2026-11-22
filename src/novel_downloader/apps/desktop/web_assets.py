@@ -1121,6 +1121,14 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
           </div>
 
           <div class="card settings-card">
+            <div class="settings-title" data-i18n="Window">Window</div>
+            <div class="settings-help" data-i18n="The window reopens at its last size and position. Resetting clears that saved geometry; the current window stays as it is and the next start uses the default size.">The window reopens at its last size and position. Resetting clears that saved geometry; the current window stays as it is and the next start uses the default size.</div>
+            <div class="settings-actions">
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-reset-window"><svg class="icon"><use href="#i-desktop"/></svg><span data-i18n="Reset window position and size">Reset window position and size</span></button>
+            </div>
+          </div>
+
+          <div class="card settings-card">
             <div class="settings-title" data-i18n="Search filters">Search filters</div>
             <div class="settings-help" data-i18n="The last used filters are restored when the app starts.">The last used filters are restored when the app starts.</div>
             <div class="settings-actions">
@@ -1852,6 +1860,21 @@ $("#btn-set-shortcut").onclick = async () => {
   const r = await call("create_shortcut");
   if (r && r.message) toast(r.message, r.ok ? "ok" : "warn");
   initSettings();
+};
+
+$("#btn-reset-window").onclick = async () => {
+  const button = $("#btn-reset-window");
+  button.disabled = true;
+  const r = await call("reset_window_state");
+  button.disabled = false;
+  if (!r || r.ok !== true) {
+    toast((r && r.error) || t("Could not reset the window position and size"), "err", 7000);
+    return;
+  }
+  // The window cannot move itself mid-session; the default geometry is
+  // applied by the next start. Say exactly that instead of implying an
+  // immediate resize.
+  toast(t("Window position and size reset. It takes effect the next time the app starts."), "ok", 6000);
 };
 
 function showTransferStatus(text, kind) {
