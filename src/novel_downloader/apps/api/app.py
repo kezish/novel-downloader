@@ -148,6 +148,7 @@ CORS_ALLOW_HEADERS: tuple[str, ...] = (
     "Accept",
     "Authorization",
     "Content-Type",
+    "If-None-Match",
     "X-API-Key",
     REQUEST_ID_HEADER,
 )
@@ -155,7 +156,7 @@ CORS_ALLOW_HEADERS: tuple[str, ...] = (
 #: Response headers browser clients may read through ``--cors``. ``Retry-After``
 #: is needed so a rate-limited browser client can back off correctly, and
 #: ``X-Request-ID`` so it can quote the id of a failed request in a bug report.
-CORS_EXPOSE_HEADERS: tuple[str, ...] = ("Retry-After", REQUEST_ID_HEADER)
+CORS_EXPOSE_HEADERS: tuple[str, ...] = ("ETag", "Retry-After", REQUEST_ID_HEADER)
 
 #: OpenAPI description of the optional ``X-Request-ID`` request header. The
 #: value is read before routing by

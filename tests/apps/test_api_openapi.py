@@ -513,7 +513,8 @@ def test_every_documented_response_carries_the_request_id_header(
 def test_cors_configuration_documents_the_exposed_correlation_headers() -> None:
     """The documented CORS promise matches the middleware configuration."""
     assert REQUEST_ID_HEADER in CORS_ALLOW_HEADERS
-    assert set(CORS_EXPOSE_HEADERS) == {"Retry-After", REQUEST_ID_HEADER}
+    assert set(CORS_EXPOSE_HEADERS) == {"ETag", "Retry-After", REQUEST_ID_HEADER}
+    assert "If-None-Match" in CORS_ALLOW_HEADERS
 
 
 # ---------------------------------------------------------------------------

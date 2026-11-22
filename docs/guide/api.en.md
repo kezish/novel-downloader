@@ -1450,6 +1450,9 @@ curl -sD - -o /dev/null \
   current representation.
 - Comparison is the RFC 9110 weak comparison, so `W/"<tag>"` matches the
   strong tag too.
+- With `--cors`, `ETag` is listed in `Access-Control-Expose-Headers` so browser
+  JavaScript can read it, and `If-None-Match` is an allowed request header, so
+  a page can issue conditional requests itself.
 - Query parameters are part of the representation (`/history?limit=5`), so a
   different query yields a different body and a different `ETag`; an old
   validator cannot produce a false 304.
