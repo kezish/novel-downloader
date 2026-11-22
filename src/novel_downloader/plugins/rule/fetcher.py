@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any, ClassVar
 
+from novel_downloader.plugins.base.errors import RedirectLimitError, TransportError
 from novel_downloader.plugins.base.fetcher import BaseFetcher
 
 from .engine import (
@@ -35,7 +36,26 @@ from .model import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["RuleFetcher"]
+__all__ = ["RuleFetcher", "RuleFetchTimeoutError"]
+
+
+class RuleFetchTimeoutError(RuleError, TransportError):
+    """A rule page request exhausted its retry budget on timeouts.
+
+    It is both a :class:`~.model.RuleError` -- the failure the rule engine
+    reports to its callers -- and a
+    :class:`~novel_downloader.plugins.base.errors.TransportError` so the
+    already-spent retry budget is still visible to the download loop, which
+    must not multiply the request count by retrying the same timeout.
+    """
+
+    retryable = False
+
+    def __init__(self, url: str, reason: BaseException) -> None:
+        # ``RuleError`` is a ``ValueError`` and ``TransportError`` a
+        # ``ConnectionError``; call the latter explicitly for the
+        # already-translated, URL-carrying message.
+        TransportError.__init__(self, url, reason)
 
 
 class RuleFetcher(BaseFetcher):
@@ -65,7 +85,20 @@ class RuleFetcher(BaseFetcher):
         headers = {**self._rule.headers, **(extra_headers or {})}
         if headers:
             kwargs.setdefault("headers", headers)
-        return await self.fetch(url, encoding=self._rule.encoding, **kwargs)
+        try:
+            return await self.fetch(url, encoding=self._rule.encoding, **kwargs)
+        except TransportError as exc:
+            # ``fetch`` already spent the retry budget.  A timeout is reported
+            # as the rule engine's error type (while remaining a
+            # ``TransportError``) so callers get one readable classification
+            # instead of a backend-dependent one.
+            if isinstance(exc.reason, TimeoutError):
+                raise RuleFetchTimeoutError(url, exc.reason) from exc
+            raise
+        except TimeoutError as exc:
+            # A subclass may override ``fetch`` and let the raw timeout escape
+            # instead of wrapping it in ``TransportError``.
+            raise RuleFetchTimeoutError(url, exc) from exc
 
     def _render_headers(
         self, headers: dict[str, str], base: str, **fmt: Any
@@ -196,6 +229,12 @@ class RuleFetcher(BaseFetcher):
                     break
             try:
                 current = await self._get(next_url, extra_headers)
+            except (RuleFetchTimeoutError, RedirectLimitError):
+                # A missing *guessed* page is tolerated (max_pages on a JSON
+                # endpoint, a 404), but a timeout or a redirect loop is a
+                # deterministic failure after the retry budget: dropping the
+                # page would return silently truncated content.
+                raise
             except Exception as e:
                 logger.warning(
                     "Failed extra page (site=%s, url=%s): %s",
