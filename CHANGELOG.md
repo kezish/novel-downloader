@@ -1,3 +1,21 @@
+## v1.38.1 (2026-11-22)
+
+补丁版：凭据脱敏、重试与诊断契约。
+
+### Fix
+
+- **音乐凭据**：`health/search/download` 的错误文本、`http_headers`、日志统一脱敏（`MUSIC_U`/Bearer/URL userinfo/签名 query）；`weapi` 异常链不再携带明文；凭据文件写入补 `fsync`
+- **doctor**：`proxy_password` / `client_secret` / `auth_token` 等带前缀的凭据键现在也会脱敏（旧 `\b` 因 `_` 是词字符而漏匹配）；空错误消息回退异常类名
+- **规则抓取**：超时归类为 `RuleError`（同时保留 `TransportError` 语义），额外页超时/重定向不再被静默吞掉；取消照常传播
+- **Android**：API 客户端对 5xx/429 有界重试并支持 `Retry-After`（上限 10s），GET/HEAD 才重试网络异常，POST 不重放 5xx；重试等待可取消；origin 比较补上 scheme
+- **发布工具**：`git ls-remote` 不可达时经 REST 查询 tag；截断响应按网络错误重试；内容一致的远端 tag 与 tag 提交树比较
+
+### Test
+
+- Python **15173 passed / 64 skipped**；ruff/format、mypy 全绿
+- Android 58 个测试类 768 用例全过；`lintDebug` 通过
+- 新增：条件请求鉴权顺序、音乐凭据脱敏、doctor JSON 契约、Android 重试、规则抓取超时矩阵
+
 ## v1.38.0 (2026-11-22)
 
 轮询效率、运维诊断与桌面/官网体验。
