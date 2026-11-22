@@ -324,7 +324,10 @@ Rules:
 | `--allow-tag-content-equal` without `--skip-build` | the combination is rejected |
 
 `--allow-tag-content-equal` reads the remote tag commit's tree through the API and
-compares it with the local `HEAD^{tree}`; it only proceeds when they are equal. It
+compares it with the tree of the commit the local tag points at (HEAD may have
+moved ahead during a resume); it only proceeds when they are equal. When
+`git ls-remote` is unreachable the script queries the tag ref through REST
+instead of assuming the tag is absent. It
 exists for API-replayed pushes (`build/push_replay.py` / `scripts/push_via_api.py`),
 which create a new commit with the same content:
 

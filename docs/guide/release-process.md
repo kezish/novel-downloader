@@ -298,7 +298,8 @@ release 全程以**草稿**创建，只有这一步通过才 `PATCH` 成公开�
 | `--allow-tag-content-equal` 不带 `--skip-build` | 参数组合直接拒绝 |
 
 `--allow-tag-content-equal` 会通过 API 读取远端 tag 提交的 tree，与本地
-`HEAD^{tree}` 比较；只相等才放行，否则仍拒绝。它针对的是 API 重放推送
+**tag 所指向提交**的 tree 比较（断点续跑时 HEAD 可能已前进）；只相等才放行，否则仍拒绝。
+`git ls-remote` 不可达时，脚本改经 REST 查询 tag ref，避免误判“远端还没有 tag”。它针对的是 API 重放推送
 （`build/push_replay.py` / `scripts/push_via_api.py`）产生的内容一致、SHA 不同的提交：
 
 ```bash
