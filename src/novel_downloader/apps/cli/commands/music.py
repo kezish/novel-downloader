@@ -93,7 +93,11 @@ def _safe_error(value: object) -> str:
     """
     from novel_downloader.apps.music.serialize import sanitize_reason
 
-    return sanitize_reason(value)
+    text = sanitize_reason(value)
+    if not text and isinstance(value, BaseException):
+        # A broken ``__str__`` must not leave the user with a blank reason.
+        return type(value).__name__
+    return text
 
 
 @dataclass
