@@ -1288,20 +1288,23 @@ curl -sD - -o /dev/null \
   只请求它们的客户端拿到未压缩响应）；
 - 状态为 `2xx` 且带响应体（`204`/`205`/`206`/`304` 除外）；
 - `Content-Type` 是 JSON（`application/json` 或 `application/*+json`）；
-- 响应体至少 1 KiB。
+- 响应体至少 1 KiB；
+- 不是 `HEAD` 请求：HEAD 没有正文可编码，响应头保持 identity 表示、
+  不带 `Content-Encoding`（embedded 引擎的差异见下）。
 
 压缩后的响应带 `Content-Encoding: gzip`，并**移除** `Content-Length`
 （编码后的长度要到流结束才知道，服务器改用分块传输）；未压缩的响应保留
 精确的 `Content-Length`。小于 1 KiB 的 JSON 不压缩：gzip 头尾与额外响应头
 的开销可能超过收益。
 
-所有 `/api/v1` 响应（包括 `304`、SSE 与各类错误）都带
+所有 `/api/v1` 响应（CORS 预检除外；包括 `304`、SSE 与各类错误）都带
 `Vary: Accept-Encoding`，避免共享缓存把某个客户端的 gzip 表示复用给不
 支持它的客户端。以下内容**从不压缩**：
 
 - SSE（`text/event-stream`）：压缩需要缓冲，会破坏实时性；
 - `/downloads/*` 文件：导出产物往往已压缩，且从磁盘流式发送；
-- `304` 与其他无响应体的状态。
+- `304` 与其他无响应体的状态；
+- `HEAD`：只返回响应头，不发送正文。
 
 ```bash
 # 协商 gzip（--compressed 会解压并显示正文）
@@ -1316,6 +1319,25 @@ curl -s -H 'Accept-Encoding: gzip' -D - -o /tmp/sites.gz \
 在 gzip 与 identity 下 `ETag` 相同。任一编码下拿到的 `ETag` 放进
 `If-None-Match`，两种编码都会得到 `304`；压缩发生在条件判断之后，不会
 改变校验器。
+
+#### 嵌入式引擎（Android）的差异 {#compression-embedded}
+
+Android 端由内嵌的 stdlib HTTP 引擎提供同一套 `/api/v1` 接口。它复用
+共用的压缩策略（`apps/common/compression.py`）：同样只接受 gzip、只压缩
+JSON、门槛同为 1 KiB、状态与 `Accept-Encoding` 权重解析一致，`Vary`、
+`ETag` 与「未压缩表示」的关系也相同。差别只在传输细节：
+
+- **保留 `Content-Length`**：引擎在发送前已拿到完整 JSON，能直接算出压缩
+  后的长度并写入该头；REST 传输是流式编码，因此会移除该头改用分块传输。
+  未压缩时两种传输都保留精确的 `Content-Length`。
+- **`Vary` 覆盖更广**：每个 JSON 响应都带 `Vary: Accept-Encoding`，包括
+  `404`/`405`/`500` 等错误响应与 `304`；`/downloads/*` 同样不带该头。
+- **HEAD 按 GET 计算头部**：引擎对 HEAD 只发送头部、不发送正文，因此一个
+  可压缩表示的 HEAD 会带 `Content-Encoding: gzip` 与压缩后的
+  `Content-Length`（即头部与同条件的 GET 一致）；REST 传输的 HEAD 则始终
+  保持 identity 响应头。
+- 引擎没有 SSE 端点，`text/event-stream` 的排除规则自然不触发；
+  `/downloads` 与无正文状态同样从不压缩。
 
 ### CORS
 

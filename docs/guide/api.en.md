@@ -1472,7 +1472,10 @@ A `/api/v1` JSON response is gzipped when all of the following hold:
   implemented, so a client asking only for those gets identity);
 - the status is `2xx` and carries a body (`204`/`205`/`206`/`304` excepted);
 - the `Content-Type` is JSON (`application/json` or `application/*+json`);
-- the body is at least 1 KiB.
+- the body is at least 1 KiB;
+- the request is not `HEAD`: there is no body to encode, so the head keeps the
+  identity representation and carries no `Content-Encoding` (the embedded
+  engine differs slightly; see below).
 
 A compressed response carries `Content-Encoding: gzip` and **drops**
 `Content-Length` (the encoded length is not known until the stream ends, so
@@ -1480,7 +1483,8 @@ the server switches to chunked transfer); an identity response keeps an exact
 `Content-Length`. JSON below 1 KiB is not compressed: the gzip header/trailer
 plus the extra response header can cost more than they save.
 
-Every `/api/v1` response — `304`, SSE and errors included — carries
+Every `/api/v1` response (CORS preflights excepted — they are answered by an
+outer layer — with `304`, SSE and errors included) carries
 `Vary: Accept-Encoding`, so a shared cache never reuses one client's gzip
 representation for a client that cannot decode it. The following are
 **never** compressed:
@@ -1489,7 +1493,8 @@ representation for a client that cannot decode it. The following are
   real-time delivery;
 - `/downloads/*` files: exports are often already compressed and are streamed
   from disk;
-- `304` and the other body-less statuses.
+- `304` and the other body-less statuses;
+- `HEAD`: only the response head is sent, with no body.
 
 ```bash
 # Negotiate gzip (--compressed decompresses and prints the body)
@@ -1505,6 +1510,28 @@ from the **uncompressed** representation, so the same resource has the same
 `ETag` under gzip and identity. A validator obtained in either mode still
 yields `304`; compression happens after the conditional decision and never
 changes the validator.
+
+#### Embedded engine (Android) differences {#compression-embedded}
+
+The Android app serves the same `/api/v1` routes from a stdlib HTTP engine.
+It reuses the shared policy (`apps/common/compression.py`): gzip only, JSON
+only, the same 1 KiB threshold and the same status/`Accept-Encoding` weight
+parsing, with `Vary`, the `ETag` and its relation to the uncompressed
+representation behaving identically. Only the transport details differ:
+
+- **`Content-Length` is kept**: the engine has the whole JSON body before it
+  writes the head, so it declares the compressed length. The REST transport
+  encodes as it streams and therefore removes the header and switches to
+  chunked transfer. Both keep an exact `Content-Length` when serving identity.
+- **`Vary` is broader**: every JSON response carries `Vary: Accept-Encoding`,
+  including `404`/`405`/`500` errors and `304`; `/downloads/*` still does not
+  send it.
+- **HEAD mirrors GET headers**: the engine answers HEAD with the same headers
+  as GET but writes no body, so a compressible representation's HEAD carries
+  `Content-Encoding: gzip` and the compressed `Content-Length`. The REST
+  transport's HEAD always keeps the identity head instead.
+- The engine has no SSE endpoint, so the `text/event-stream` exclusion never
+  fires there; `/downloads` and body-less statuses are still never compressed.
 
 ### CORS
 

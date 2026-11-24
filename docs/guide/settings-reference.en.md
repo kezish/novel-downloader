@@ -28,6 +28,21 @@ A missing value (the cache has not been used yet) or a failed read renders as `0
 
 On success a "Search cache cleared" toast appears and the card is refreshed; on failure the toast shows the error text, the card keeps its previous values, and the action can be retried immediately.
 
+### Desktop recent searches {#desktop-recent-searches}
+
+A row of chips under the search box lists the terms that **really ran** (at most 10, newest first); the row is hidden entirely when there is nothing to show. An empty or whitespace-only box, a rejected filter, and a request that was superseded or cancelled before its backend search started never create an entry.
+
+* **Cap and de-duplication**: beyond 10 entries the oldest is dropped; re-searching the same term (compared case-insensitively) does not add a duplicate but moves the existing entry to the front, showing the most recent spelling.
+* **Normalisation**: each term is trimmed, runs of internal whitespace collapse to one space, and the result is truncated to 200 characters; a term that is empty after normalisation is not written.
+* **Clicking a chip** fills the box with that term and immediately searches again with the **current** filters and sort, not the ones in effect at the time. That search records the term again, so it stays at the front.
+* **Clearing**: "Clear recent searches" at the right of the chip row has no confirmation step; clicking it deletes every entry and hides the row at once. Clearing removes the `search_history` key from the preferences file rather than writing an empty list.
+
+**Storage**: the terms live with the other desktop preferences under the `search_history` key of `desktop_prefs.json` (by default under `music/` in the application data directory, with no separate file), reusing that file's cross-process lock and temporary-file + atomic-replace write.
+
+**Corrupt data**: entries are validated one by one — a top-level value that is not a list loads as an empty list, an element that is not an object is skipped, and a `query` that is not a string or normalises to empty is skipped too, so one bad record never discards the whole list. If the preferences file as a whole cannot be parsed or is not a JSON object, the recent searches load as empty; the next record or clear first moves the original file atomically to `desktop_prefs.json.broken` before writing, instead of silently overwriting it.
+
+**Not exported**: recent searches are local runtime state and are not in the settings export whitelist; an import document containing `search_history` is rejected as an unknown field. Importing on another machine therefore neither brings search history along nor clears the history already on that machine.
+
 ### Desktop Settings: Updates {#desktop-settings-updates}
 
 The **Settings → Updates** card has three switches and a check-now button:
@@ -97,7 +112,7 @@ The **Settings → Backup** card exports the **desktop preferences** as JSON and
 | Music account tokens (TIDAL / Apple Music / SoundCloud, etc.) | Account credentials; device-private data |
 | Output folder, interface language | Stored in `settings.toml` / a separate state file and chosen per device and person; not part of the desktop preferences file |
 | Throttle state such as `last_update_check`, and `skipped_update_version` | Local runtime state; migrating it is meaningless, and a skipped version would only give the new machine an equally meaningless "skipped" marker |
-| `search_history` (recent searches) | Local runtime state; query terms are usage traces, migrating them is meaningless and would carry what the user searched for to another machine |
+| `search_history` ([recent searches](#desktop-recent-searches)) | Local runtime state; query terms are usage traces, migrating them is meaningless and would carry what the user searched for to another machine |
 | Music download options such as `embed_lyric` | Shared with the CLI through the music settings file; exporting them would create a second source of truth |
 
 The exported JSON is therefore safe to put in a sync folder or a chat message; the trade-off is that the proxy, accounts, output folder and language must be set again on the new machine (see "Limits of moving to another machine").
@@ -108,14 +123,6 @@ The exported JSON is therefore safe to put in a sync folder or a chat message; t
 * The write uses a temporary file plus an atomic replace, so a half-written file is never left behind.
 * Exporting onto an existing directory is refused; other write failures are reported only in the card's status line and the toast.
 * When the preferences file is missing or unreadable, the export contains the defaults (`theme=light`, all three update switches on, empty filters) instead of failing.
-
-**Recent searches (`search_history`)**
-
-A chip row under the search box shows the terms that were actually searched (at most 10, newest first). Only searches that **really ran** are recorded: an empty or whitespace-only box, a rejected filter and a cancelled request never create an entry. Re-searching the same term (case-insensitive, ignoring surrounding whitespace) does not add a duplicate; it moves the existing entry to the front. A term is capped at 200 characters and runs of internal whitespace collapse to one space.
-
-The terms live with the other desktop preferences under the `search_history` key of `desktop_prefs.json` rather than in a separate file, reusing that file's cross-process lock, temporary-file + atomic-replace write and corrupt-file quarantine. The clear entry is the "Clear recent searches" button at the right of the chip row; clearing removes the key instead of writing an empty list.
-
-Recent searches are **local runtime state**: they are not in the export whitelist, and an import document containing `search_history` is rejected as an unknown field. Importing on another machine therefore neither brings search history along nor clears the history already on that machine.
 
 **Import validation**
 
