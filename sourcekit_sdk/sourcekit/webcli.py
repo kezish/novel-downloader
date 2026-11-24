@@ -28,14 +28,17 @@ def resolve(url):
         return "sk_czbooks",m[1]
     raise ValueError("unsupported book URL")
 
-async def query(keyword,sites,cursors=None):
-    from .paged_search import paged_query,MAX_PAGE
+async def query(keyword,sites,cursors=None,category="",order="relevance"):
+    from .paged_search import paged_query,MAX_PAGE,CATEGORIES
     cursors=cursors or {}
     if not keyword.strip() or len(keyword)>100 or not sites or any(s not in SITES for s in sites):
         raise ValueError("invalid search request")
     if any(s not in sites or type(n) is not int or not 1<=n<=MAX_PAGE for s,n in cursors.items()):
         raise ValueError("invalid search page")
-    return await paged_query(keyword,list(dict.fromkeys(sites)),cursors,resolve)
+    if category and (category not in CATEGORIES or any(s!="sk_shuku52" for s in sites)):
+        raise ValueError("invalid or unsupported category")
+    if order not in ("relevance","newest","oldest"):raise ValueError("invalid sort")
+    return await paged_query(keyword,list(dict.fromkeys(sites)),cursors,resolve,category,order)
 
 class Progress:
     async def on_start(self,book):pass
@@ -64,12 +67,12 @@ async def download(url,output,cache):
 def main():
     p=argparse.ArgumentParser();p.add_argument("--build",default=str(ROOT/"build"))
     sub=p.add_subparsers(dest="command",required=True)
-    s=sub.add_parser("search");s.add_argument("keyword");s.add_argument("--sites",nargs="+",choices=list(SITES),required=True);s.add_argument("--cursors",default="{}")
+    s=sub.add_parser("search");s.add_argument("keyword");s.add_argument("--sites",nargs="+",choices=list(SITES),required=True);s.add_argument("--cursors",default="{}");s.add_argument("--category",default="",choices=["","romance","bl","gl","fanfic","male"]);s.add_argument("--order",default="relevance",choices=["relevance","newest","oldest"])
     m=sub.add_parser("metadata");m.add_argument("url")
     d=sub.add_parser("download");d.add_argument("url");d.add_argument("--output-dir",required=True);d.add_argument("--cache-dir",required=True)
     a=p.parse_args()
     register_sources(a.build)
-    if a.command=="search":print(json.dumps(asyncio.run(query(a.keyword,a.sites,json.loads(a.cursors))),ensure_ascii=False));return 0
+    if a.command=="search":print(json.dumps(asyncio.run(query(a.keyword,a.sites,json.loads(a.cursors),a.category,a.order)),ensure_ascii=False));return 0
     if a.command=="metadata":
         from .metadata import metadata
         print(json.dumps(asyncio.run(metadata(a.url)),ensure_ascii=False));return 0

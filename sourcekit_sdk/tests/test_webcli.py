@@ -75,10 +75,21 @@ def test_cli_cursor_arguments(monkeypatch,capsys):
     import sys,json
     import sourcekit.webcli as cli
     monkeypatch.setattr(cli,"register_sources",lambda path:None)
-    async def query(keyword,sites,cursors):
+    async def query(keyword,sites,cursors,category="",order="relevance"):
         assert keyword=="重生" and sites==["sk_shuku52"] and cursors=={"sk_shuku52":4}
         return {"results":[],"statuses":{}}
     monkeypatch.setattr(cli,"query",query)
     monkeypatch.setattr(sys,"argv",["webcli","search","--sites","sk_shuku52","--cursors",'{"sk_shuku52":4}',"--","重生"])
     assert cli.main()==0
     assert json.loads(capsys.readouterr().out)["results"]==[]
+
+def test_52_filters_and_dates():
+    from sourcekit.paged_search import page_url,pagination,search_metadata
+    from urllib.parse import urlsplit,parse_qs
+    u=page_url("sk_shuku52","重生",2,"gl","newest")
+    assert parse_qs(urlsplit(u).query)=={"q":["重生"],"m":["no"],"f":["_all"],"syn":["no"],"c":["5"],"s":["time"],"p":["2"]}
+    raw='<article class="excerpt"><header><h2><a href="https://www.52shuku.net/gl/a.html">书名</a></h2></header><span class="cat"><a>GL百合</a></span><span class="time">发布时间：2026-11-14</span></article><div class="xs-pagination"><a href="'+u.replace("&","&amp;")+'">2</a></div>'
+    assert search_metadata("sk_shuku52",raw)["https://www.52shuku.net/gl/a.html"]=={"category":"GL百合","published":"2026-11-14"}
+    assert pagination("sk_shuku52","重生",raw,1,u,"gl","newest")==2
+    assert pagination("sk_shuku52","重生",raw,1,u,"bl","newest") is None
+    assert pagination("sk_shuku52","重生",raw,1,u,"gl","oldest") is None
