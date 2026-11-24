@@ -506,7 +506,6 @@ async def test_client_disconnect_does_not_leak_music_thread(
     )
 
     app = make_app(timeouts={"music_search": 30.0})
-    before = len(_pool_threads())
     try:
         await _drain_blocking_pool()
         async with _client(app) as client:
@@ -538,7 +537,9 @@ async def test_client_disconnect_does_not_leak_music_thread(
     finally:
         gate.open()
 
-    assert len(_pool_threads()) <= max(before, api_routes.BLOCKING_POOL_WORKERS)
+    # Two cancelled/served requests never grew the pool past its cap (a
+    # per-request thread would show up as one thread per disconnect).
+    assert len(_pool_threads()) <= api_routes.BLOCKING_POOL_WORKERS
 
 
 # ---------------------------------------------------------------------------
