@@ -34,6 +34,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SITE = ROOT / "website"
 INDEX = SITE / "index.html"
 ERROR_PAGE = SITE / "404.html"
+CHANGELOG_PAGE = SITE / "changelog.html"
+CHANGELOG_MD = ROOT / "CHANGELOG.md"
 CSS_FILE = SITE / "style.css"
 JS_FILE = SITE / "main.js"
 ROBOTS = SITE / "robots.txt"
@@ -195,6 +197,19 @@ def error_text() -> str:
 def error_doc(error_text: str) -> _Doc:
     parser = _Doc()
     parser.feed(error_text)
+    parser.close()
+    return parser
+
+
+@pytest.fixture(scope="module")
+def changelog_text() -> str:
+    return CHANGELOG_PAGE.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def changelog_doc(changelog_text: str) -> _Doc:
+    parser = _Doc()
+    parser.feed(changelog_text)
     parser.close()
     return parser
 
@@ -1298,14 +1313,14 @@ def test_manifest_lookup_falls_back_to_the_github_api(js: str) -> None:
 
 def test_footer_release_notes_link_is_static_and_safe(doc: _Doc) -> None:
     """The changelog entry must be a plain footer link: usable with JS off,
-    opened safely, bilingual, and pointed at a file that actually exists."""
-    url = "https://github.com/lingyi-ling/novel-downloader/blob/main/CHANGELOG.md"
+    opened safely, bilingual, and pointed at a page that actually exists."""
+    href = "changelog.html"
     matches = [
         (data, ancestors)
         for data, ancestors in doc.by_tag("a")
-        if data.get("href") == url
+        if data.get("href") == href
     ]
-    assert len(matches) == 1, "exactly one footer link must point at CHANGELOG.md"
+    assert len(matches) == 1, "exactly one footer link must point at changelog.html"
     data, ancestors = matches[0]
 
     # it belongs to the footer navigation, next to GitHub / Docs / Issues
@@ -1327,13 +1342,14 @@ def test_footer_release_notes_link_is_static_and_safe(doc: _Doc) -> None:
         for text, text_ancestors in doc.texts
         if text.strip()
         and any(
-            tag == "a" and attrs.get("href") == url for tag, attrs in text_ancestors
+            tag == "a" and attrs.get("href") == href for tag, attrs in text_ancestors
         )
     ]
     assert "更新日志" in labels
 
     # a changelog link that 404s is worse than no link at all
-    assert (ROOT / "CHANGELOG.md").is_file()
+    assert (SITE / href).is_file()
+    assert CHANGELOG_MD.is_file(), "the page is built from this source"
 
 
 def _verify_dl_block(html_text: str) -> str:
@@ -1496,19 +1512,30 @@ def test_robots_and_sitemap_agree(doc: _Doc) -> None:
     canonical = [
         data["href"] for data, _ in doc.by_tag("link") if data.get("rel") == "canonical"
     ][0]
+    changelog_url = "http://43.165.170.43/noveldl/changelog.html"
 
     assert "Allow: /" in robots
     assert "Sitemap: http://43.165.170.43/noveldl/sitemap.xml" in robots
     assert "Sitemap: http://43.165.170.43/noveldl/sitemap.txt" in robots
-    assert sitemap.strip() == canonical
+
+    urls = [line.strip() for line in sitemap.splitlines() if line.strip()]
+    assert urls[0] == canonical
+    assert changelog_url in urls
+    assert len(urls) == len(set(urls)), "sitemap.txt contains duplicates"
 
     root = ET.parse(SITEMAP_XML).getroot()
     locs = [
         (loc.text or "").strip()
         for loc in root.iter("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")
     ]
-    assert locs == [canonical]
-    # no fixed old releases anywhere on the page
+    assert canonical in locs
+    assert changelog_url in locs
+    assert len(locs) == 2 and len(set(locs)) == 2
+    # the changelog page must claim the same URL the sitemaps advertise
+    assert f'<link rel="canonical" href="{changelog_url}">' in CHANGELOG_PAGE.read_text(
+        encoding="utf-8"
+    )
+    # no fixed old releases anywhere on the home page
     assert "/releases/tag/v" not in INDEX.read_text(encoding="utf-8")
 
 
@@ -1658,6 +1685,125 @@ def test_404_local_assets_resolve_under_the_site_prefix(error_doc: _Doc) -> None
     # The 404 page reuses the main site's shell instead of a second design.
     assert '<header class="nav">' in ERROR_PAGE.read_text(encoding="utf-8")
     assert '<footer class="footer">' in ERROR_PAGE.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# static changelog page
+# --------------------------------------------------------------------------
+RELEASE_TAG_BASE = "https://github.com/lingyi-ling/novel-downloader/releases/tag/"
+
+
+def recent_changelog_versions(limit: int = 6) -> list[tuple[str, str]]:
+    """The top N (version, date) pairs of the repository CHANGELOG."""
+    source = CHANGELOG_MD.read_text(encoding="utf-8")
+    rows = re.findall(r"^## (v\d+\.\d+\.\d+) \((\d{4}-\d{2}-\d{2})\)", source, re.M)
+    return rows[:limit]
+
+
+def _changelog_articles(text: str) -> list[str]:
+    return re.findall(r'<article class="card cl-entry">(.*?)</article>', text, re.S)
+
+
+def test_changelog_is_a_landmark_document(changelog_doc: _Doc) -> None:
+    html = [data for tag, data, _ in changelog_doc.elements if tag == "html"][0]
+    assert html["lang"] == "zh-CN"
+    assert changelog_doc.headings.count(1) == 1
+
+    previous = 0
+    for level in changelog_doc.headings:
+        assert level <= previous + 1, f"heading jumped from h{previous} to h{level}"
+        previous = level
+
+    tags = [tag for tag, _, _ in changelog_doc.elements]
+    for landmark in ("header", "nav", "main", "footer"):
+        assert landmark in tags
+    for landmark in ("header", "main", "footer"):
+        assert tags.count(landmark) == 1, f"{landmark} must appear once"
+
+    order = [tag for tag, _ in changelog_doc.order]
+    assert order.index("header") < order.index("main") < order.index("footer")
+
+    for data, _ in changelog_doc.by_tag("nav"):
+        assert data.get("aria-label"), "every nav landmark needs a name"
+
+    assert changelog_doc.body_link is not None
+    assert changelog_doc.body_link.get("class") == "skip-link"
+    assert changelog_doc.body_link.get("href") == "#main"
+
+    main = [data for tag, data, _ in changelog_doc.elements if tag == "main"][0]
+    assert main.get("id") == "main"
+    assert main.get("tabindex") == "-1"
+
+    duplicates = {
+        item for item in changelog_doc.ids if changelog_doc.ids.count(item) > 1
+    }
+    assert not duplicates
+
+
+def test_changelog_entries_match_the_changelog_source(changelog_text: str) -> None:
+    """Every rendered entry must come from a real CHANGELOG heading: no invented
+    versions, no invented dates, and each links to its own release tag."""
+    versions = recent_changelog_versions()
+    assert len(versions) >= 4, "the changelog page should list at least four releases"
+
+    articles = _changelog_articles(changelog_text)
+    assert len(articles) == len(versions)
+
+    for body, (version, date) in zip(articles, versions, strict=True):
+        assert version in body, f"{version} is missing its heading"
+        assert date in body, f"{version} shows no date"
+        assert f"{RELEASE_TAG_BASE}{version}" in body, f"{version} has no release link"
+        bullets = re.findall(r"<li\b", body)
+        assert 3 <= len(bullets) <= 6, f"{version} has {len(bullets)} bullets"
+        assert "data-en=" in body, f"{version} entry has no English copy"
+
+    # newest first, matching the order of CHANGELOG.md
+    dates = [date for _, date in versions]
+    assert dates == sorted(dates, reverse=True), dates
+
+
+def test_changelog_external_links_open_safely(changelog_doc: _Doc) -> None:
+    for attrs, _ in changelog_doc.by_tag("a"):
+        href = attrs.get("href", "")
+        if href.startswith("http") and attrs.get("target") == "_blank":
+            assert "noopener" in attrs.get("rel", "").split(), href
+
+
+def test_changelog_links_and_assets_resolve(changelog_doc: _Doc) -> None:
+    """No dead in-page anchors, no missing local files: the page ships as-is."""
+    ids = set(changelog_doc.ids)
+    refs: set[str] = set()
+    for attrs in changelog_doc.with_attr("href") + changelog_doc.with_attr("src"):
+        for attr in ("href", "src"):
+            value = attrs.get(attr, "")
+            if not value:
+                continue
+            if value.startswith("#"):
+                if len(value) > 1:
+                    assert value[1:] in ids, f"dead in-page anchor: {value}"
+                continue
+            if value.startswith(("http://", "https://", "//", "mailto:")):
+                continue
+            if value.startswith("/noveldl/"):
+                relative = value[len("/noveldl/") :].split("?")[0].split("#")[0]
+                if relative:
+                    assert (SITE / relative).is_file(), f"missing local target: {value}"
+                continue
+            path = value.split("?")[0].split("#")[0]
+            assert (SITE / path).is_file(), f"missing local asset: {value}"
+            refs.add(path)
+
+    assert {"style.css", "favicon.svg"} <= refs
+    assert "main.js" not in refs, "the changelog page ships its own inline switch"
+
+
+def test_changelog_uses_the_shared_shell_and_is_reachable(changelog_text: str) -> None:
+    assert '<header class="nav">' in changelog_text
+    assert '<footer class="footer">' in changelog_text
+    assert 'class="skip-link"' in changelog_text
+    # a changelog page that cannot be reached from the site is dead weight
+    assert 'href="changelog.html"' in INDEX.read_text(encoding="utf-8")
+    assert "/noveldl/changelog.html" in ERROR_PAGE.read_text(encoding="utf-8")
 
 
 # --------------------------------------------------------------------------

@@ -8,4 +8,11 @@
     <xhtml:link rel="alternate" hreflang="en" href="http://43.165.170.43/noveldl/?lang=en"/>
     <xhtml:link rel="alternate" hreflang="x-default" href="http://43.165.170.43/noveldl/"/>
   </url>
+  <url>
+    <loc>http://43.165.170.43/noveldl/changelog.html</loc>
+    <lastmod>2026-11-25</lastmod>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="http://43.165.170.43/noveldl/changelog.html"/>
+    <xhtml:link rel="alternate" hreflang="en" href="http://43.165.170.43/noveldl/changelog.html?lang=en"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="http://43.165.170.43/noveldl/changelog.html"/>
+  </url>
 </urlset>
