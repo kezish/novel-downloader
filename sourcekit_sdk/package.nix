@@ -5,7 +5,7 @@ let
   ]);
 in stdenvNoCC.mkDerivation {
   pname = "novel-sourcekit-cli";
-  version = "1.41.1-prototype";
+  version = "1.42.0-prototype";
   src = source;
   nativeBuildInputs = [ makeWrapper ];
   dontBuild = true;

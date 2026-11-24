@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from novel_downloader.plugins.rule.model import parse_rule, SearchRule
 ROOT=Path(__file__).resolve().parents[1]
-ENGINE_COMMIT="70a622f741f3a0665c3c5eb666309438dd8e348a"
+ENGINE_COMMIT="551ae6b8dcb4dae2656def3db8bc986a509365d3"
 def read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 def merge(base, overrides):

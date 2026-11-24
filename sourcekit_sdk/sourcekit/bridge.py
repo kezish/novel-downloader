@@ -125,7 +125,7 @@ def plugin_classes(item):
                 searcher=type(key+"Searcher",(sb,),dict(_rule=rule,site_name=key,BASE_URL=rule.base_url,priority=rule.search.priority)),
                 client=ReadingPageClient if ext=="reading_pages" else None)
 def register_sources(build):
-    if __version__!="1.41.1":raise RuntimeError("unverified upstream version "+__version__)
+    if __version__!="1.42.0":raise RuntimeError("unverified upstream version "+__version__)
     build=Path(build).resolve();m=read_json(build/"manifest.json")
     if m["engine_commit"]!=ENGINE_COMMIT or digest({k:v for k,v in m.items() if k!="sha256"})!=m["sha256"]:raise ValueError("manifest mismatch")
     for x in m["sources"]:
