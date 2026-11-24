@@ -96,8 +96,20 @@ _MUTE_LOGGERS: set[str] = {
     "fontTools.ttLib.tables._p_o_s_t",
 }
 
-#: Any CSI sequence: colour and text attributes (bold/underline) both use it.
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+#: Terminal escape sequences: CSI (colour, cursor, bold/underline), OSC
+#: (hyperlinks, window titles) and the remaining two-character escapes.
+#: Applied twice for untrusted text: to the payload *before* Rich measures a
+#: cell -- an escape counted as visible text shortens the padding and breaks
+#: the borders, and a hyperlink would reach a real terminal -- and to the
+#: rendered stream when it is not a TTY, where Rich's cached colour system may
+#: still have emitted attributes.
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"  # CSI
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC, BEL- or ST-terminated
+    r"|\x1b[()][0-9A-Za-z]"  # charset designation
+    r"|\x1b[@-_]"  # other two-character escapes (Fe, 0x40-0x5F)
+    r"|\x1b"  # a truncated sequence must not leak the ESC byte
+)
 
 
 class _SafeStream:
@@ -154,6 +166,30 @@ class _CLIConsole(Console):
         return _ANSI_ESCAPE_RE.sub("", rendered)
 
 
+#: The narrowest console a table may be laid out at. Rich itself turns
+#: ``COLUMNS=0`` (or ``1`` on a legacy Windows console, which subtracts one
+#: more column) into a zero/negative width, and a non-positive console renders
+#: an empty table: the user loses the whole report instead of seeing a squashed
+#: one.
+_MIN_CONSOLE_WIDTH = 1
+
+
+def _resolve_console_width(width: int | None) -> int | None:
+    """
+    Keep an explicitly requested or ``COLUMNS``-derived width positive.
+
+    ``None`` is returned when the caller did not pin a width and the
+    environment does not demand clamping, so Rich keeps its own terminal
+    detection (a real terminal size, or its 80-column fallback).
+    """
+    if width is not None:
+        return max(_MIN_CONSOLE_WIDTH, width)
+    columns = os.environ.get("COLUMNS")
+    if columns is not None and columns.isdigit() and int(columns) <= _MIN_CONSOLE_WIDTH:
+        return _MIN_CONSOLE_WIDTH
+    return None
+
+
 def _build_console(
     *, file: IO[str] | None = None, width: int | None = None
 ) -> _CLIConsole:
@@ -175,6 +211,7 @@ def _build_console(
     :param width: Fixed console width; defaults to Rich's terminal detection.
     :return: A console whose writes cannot raise ``UnicodeEncodeError``.
     """
+    width = _resolve_console_width(width)
     force_color = os.environ.get("FORCE_COLOR")
     no_color = bool(os.environ.get("NO_COLOR"))
     force_terminal: bool | None = None
@@ -645,6 +682,20 @@ def prompt_password(message: str) -> str:
         return ""
 
 
+def _display_text(value: object) -> str:
+    """
+    Make one piece of untrusted text safe to hand to Rich.
+
+    Two layers are needed. Terminal escapes are removed first: a book title
+    copied from a remote page can contain a CSI colour change or an OSC-8
+    hyperlink, and Rich measures such a sequence as visible text -- the cell
+    gets too little padding, borders misalign, and on a real terminal the
+    sequence is executed. Rich markup is escaped after that so a literal
+    ``[bold]`` in the same title is printed rather than interpreted.
+    """
+    return escape(_ANSI_ESCAPE_RE.sub("", str(value)))
+
+
 def render_table(
     title: str,
     columns: Sequence[str],
@@ -653,22 +704,24 @@ def render_table(
     """
     Render a simple full-width table.
 
+    Long values are folded across continuation lines inside their column
+    rather than elided, so no content is silently lost; ``COLUMNS`` (or the
+    detected terminal width) is the only width limit. Wide characters are
+    measured in display cells by Rich, not by character count.
+
     :param title: Table title.
     :param columns: Column names.
     :param rows: Row data; each row must have the same length as `columns`.
     """
     from rich.table import Table
 
-    # The title (e.g. "Available Books for <site>") and column headers may
-    # contain user data; escape them like the cell values below.
-    table = Table(title=escape(title), show_lines=True, expand=True)
+    # Titles, headers and cell values all come from remote/user data: strip
+    # terminal escapes and escape rich markup before Rich measures anything.
+    table = Table(title=_display_text(title), show_lines=True, expand=True)
     for col in columns:
-        table.add_column(escape(col), overflow="fold")
-    # Cell values come from remote/user data (book titles, rule names, ...);
-    # escape them so a stray "[...]" is printed literally instead of being
-    # parsed as rich markup.
+        table.add_column(_display_text(col), overflow="fold")
     for row in rows:
-        table.add_row(*[escape(str(x)) for x in row])
+        table.add_row(*[_display_text(x) for x in row])
     _CONSOLE.print(table)
 
 
