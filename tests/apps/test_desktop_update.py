@@ -246,6 +246,9 @@ def test_check_update_async_runs_in_the_background(
     prefs: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The check runs on a thread and publishes a fully-formed cache."""
+    # Keep the background check from starting a real download thread: that
+    # thread would outlive this test and consume the next test's urlopen patch.
+    prefs["auto_download_updates"] = False
     seen: dict[str, Any] = {}
 
     def fake_check(current: str, **kwargs: Any) -> UpdateCheck:
