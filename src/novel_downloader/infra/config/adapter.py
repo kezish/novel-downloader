@@ -95,7 +95,12 @@ def _float_value(
         return default
     number: float | None = None
     if isinstance(value, (int, float)):
-        number = float(value)
+        try:
+            number = float(value)
+        except OverflowError:
+            # TOML integers are unbounded; a value beyond the float range is
+            # not usable as a timeout/interval, so keep the default.
+            return default
     elif isinstance(value, str):
         try:
             number = float(value.strip())

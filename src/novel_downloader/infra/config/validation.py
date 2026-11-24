@@ -23,7 +23,6 @@ The rules below are derived from the documented contract in
 
 from __future__ import annotations
 
-import contextlib
 import copy
 import difflib
 import math
@@ -352,11 +351,37 @@ def _is_int(value: Any) -> bool:
 
 
 def _is_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        # ``math.isfinite(huge_int)`` raises OverflowError ("int too large to
+        # convert to float"), and TOML integers are unbounded.  Every Python
+        # integer is finite, so the conversion is not needed.
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return False
+
+
+def _display_int(value: int) -> str:
+    """Render an integer for a diagnostic without tripping the int/str cap.
+
+    Python 3.11+ refuses to convert integers longer than 4300 digits to text.
+    Because TOML integers are unbounded, a hand-edited (or fuzzed) value could
+    otherwise turn an error *message* into a ``ValueError``.
+    """
+    try:
+        return str(value)
+    except ValueError:
+        magnitude = "positive" if value > 0 else "negative"
+        return f"a very large {magnitude} integer"
+
+
+def _display_value(value: Any) -> str:
+    """Return ``repr(value)`` for a diagnostic, safe for unbounded integers."""
+    if _is_int(value):
+        return _display_int(value)
+    return repr(value)
 
 
 def _substitute_env_tokens(text: str) -> str:
@@ -547,7 +572,7 @@ def _check_int(
             Problem(
                 "error",
                 path,
-                f"must be >= {minimum}, got {value}.",
+                f"must be >= {minimum}, got {_display_int(value)}.",
                 f"Use an integer >= {minimum}.",
             )
         )
@@ -556,7 +581,7 @@ def _check_int(
             Problem(
                 "error",
                 path,
-                f"must be <= {maximum}, got {value}.",
+                f"must be <= {maximum}, got {_display_int(value)}.",
                 f"Use an integer <= {maximum}.",
             )
         )
@@ -578,7 +603,20 @@ def _check_number(
     if not _is_number(value):
         _type_problem(problems, path, "number", value)
         return
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        # An integer too large for a float is out of any usable range; the
+        # message must not format the value itself (see ``_display_int``).
+        problems.append(
+            Problem(
+                "error",
+                path,
+                "is outside the supported numeric range.",
+                "Use a smaller number.",
+            )
+        )
+        return
     if minimum is not None:
         too_small = number <= minimum if exclusive_minimum else number < minimum
         if too_small:
@@ -807,8 +845,23 @@ def _check_directory(
         target = Path.cwd() / target
     # Keep the unresolved path on failure; the checks below still report a
     # useful problem instead of raising.
-    with contextlib.suppress(OSError):
+    try:
         target = target.resolve()
+    except OSError:
+        pass
+    except ValueError as exc:
+        # ``Path.resolve`` raises ValueError (not OSError) for a path the OS
+        # rejects outright: an embedded NUL, or an over-long Windows path.
+        # Validation must report this instead of escaping as a traceback.
+        problems.append(
+            Problem(
+                "error",
+                path,
+                f"is not a usable path: {exc}.",
+                "Use a valid local directory path.",
+            )
+        )
+        return
     display = _display_path(target)
 
     if target.exists():
@@ -898,7 +951,8 @@ def _validate_parser(
                             Problem(
                                 "error",
                                 _join(shape_path, index),
-                                f"expected a positive integer, got {dimension!r}.",
+                                "expected a positive integer, got "
+                                f"{_display_value(dimension)}.",
                                 "Use positive integers for C, H and W.",
                             )
                         )
