@@ -72,6 +72,7 @@ __all__ = [
     "verify_manifest_signature",
     "detect_platform",
     "download_asset",
+    "DownloadCancelled",
     "is_newer",
     "parse_manifest",
     "parse_version",
@@ -892,6 +893,27 @@ def _refuse_links(path: Path, root: Path) -> None:
         current = parent
 
 
+class DownloadCancelled(Exception):
+    """A transfer was stopped by the caller's ``should_cancel`` probe.
+
+    Deliberately *not* an :class:`OSError` or :class:`ValueError`: this is not
+    a failure.  The bytes already received stay in the ``.part`` file when
+    ``resume`` is set, so the next call continues where this one stopped, and
+    a caller that only handles transfer errors does not report it as one.
+    """
+
+
+def _pause(seconds: float, cancelled: Callable[[], bool]) -> bool:
+    """Sleep *seconds*, returning ``True`` early when cancellation lands."""
+    deadline = time.monotonic() + max(0.0, seconds)
+    while not cancelled():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.1, remaining))
+    return True
+
+
 def download_asset(
     url: str,
     dest: Path,
@@ -905,6 +927,7 @@ def download_asset(
     attempts: int = 1,
     max_bytes: int | None = None,
     expected_size: int | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> Path:
     """
     Download one release asset to ``dest`` and verify its checksum.
@@ -925,6 +948,12 @@ def download_asset(
     * an advertised size must match exactly, so a truncated body or extra
       bytes are rejected;
     * a checksum or size mismatch deletes the partial file and raises.
+
+    Cancellation is cooperative and checked between chunks, never inside a
+    chunk: a transfer whose last byte already arrived runs to completion
+    (verify + rename) instead of being abandoned with a verified file on
+    disk.  A cancelled transfer keeps its ``.part`` when ``resume`` is set,
+    exactly like a dropped connection, so the next call continues it.
 
     :param url: absolute asset URL.
     :param dest: desired output path; a relative path is taken relative to
@@ -951,10 +980,15 @@ def download_asset(
     :param expected_size: size published by the manifest, when known.  The
         finished file must be exactly this long; a body that ends early is
         kept as a resumable ``.part``, one that grows beyond it is discarded.
+    :param should_cancel: optional probe polled between chunks (and between
+        attempts); returning ``True`` stops the transfer with
+        :class:`DownloadCancelled`.  An exception raised by the probe is
+        treated as "keep going": a broken callback must not kill a transfer.
     :return: the path actually written.
     :raises ValueError: for a non-HTTP URL, an escaping path, a link target,
         a bad digest or a body larger than the advertised size.
     :raises OSError: when the transfer itself fails after every attempt.
+    :raises DownloadCancelled: when ``should_cancel`` asked to stop.
     """
     if not _is_http_url(url):
         raise ValueError(f"refusing non-HTTP(S) update URL: {url!r}")
@@ -984,6 +1018,22 @@ def download_asset(
 
     final.parent.mkdir(parents=True, exist_ok=True)
     part = final.with_name(f"{final.name}.part")
+
+    def cancel_requested() -> bool:
+        # A probe is caller-supplied code: a raising callback means "keep
+        # going", never "abort the transfer" (that would turn a typo in the
+        # callback into a silent cancellation).
+        if should_cancel is None:
+            return False
+        with contextlib.suppress(Exception):
+            return bool(should_cancel())
+        return False
+
+    if cancel_requested():
+        # Checked before the mirror probe: a cancelled call must not spend
+        # seconds probing a proxy nobody is waiting for.
+        raise DownloadCancelled(f"download cancelled before it started: {filename}")
+
     resolved_url = resolve_mirror(
         url,
         _normalise_mirrors(mirror),
@@ -1006,6 +1056,10 @@ def download_asset(
     attempt = 0
     while attempt < tries:
         attempt += 1
+        if cancel_requested():
+            # Nothing written by this attempt yet: whatever prefix an earlier
+            # attempt left is exactly what a resume should continue from.
+            raise DownloadCancelled(f"download cancelled: {filename}")
         offset = 0
         if resume and part.is_file():
             offset = max(0, part.stat().st_size)
@@ -1095,6 +1149,20 @@ def download_asset(
                 report(received, total)
                 with part.open("ab" if appending else "wb") as handle:
                     while True:
+                        # Between chunks only: the bytes of a chunk already in
+                        # hand are written, so a cancel never leaves the file
+                        # ending mid-chunk.  A cancel that lands once every
+                        # published byte is already on disk is ignored: the
+                        # transfer is complete and only verify+rename is left
+                        # (completion wins over a late cancel; the extra read
+                        # below still catches a body that grows past ``size``).
+                        complete = (size is not None and received >= size) or (
+                            size is None and total > 0 and received >= total
+                        )
+                        if not complete and cancel_requested():
+                            raise DownloadCancelled(
+                                f"download cancelled after {received} bytes: {filename}"
+                            )
                         chunk = response.read(_CHUNK_SIZE)
                         if not chunk:
                             break
@@ -1138,6 +1206,14 @@ def download_asset(
                 raise ValueError(f"checksum mismatch for {filename}")
             part.replace(final)
             return final
+        except DownloadCancelled:
+            # Not a failure: never retried, never reported as one.  A resumable
+            # transfer keeps its prefix (the next call continues it); one that
+            # cannot resume has no use for the bytes, same as any other
+            # non-resume failure.
+            if not resume:
+                part.unlink(missing_ok=True)
+            raise
         except _StalePartial:
             # Not a policy refusal: the prefix on disk is unusable, so drop it
             # and retry from zero once (a 416 or a wrong Content-Range would
@@ -1166,7 +1242,10 @@ def download_asset(
                 part.unlink(missing_ok=True)
             if attempt >= tries:
                 break
-            time.sleep(min(5.0, 1.5 * attempt))
+            if _pause(min(5.0, 1.5 * attempt), cancel_requested):
+                # A retry backoff is dead time: stop during it instead of
+                # sleeping out the budget of a transfer nobody wants.
+                raise DownloadCancelled(f"download cancelled: {filename}") from None
         except ValueError:
             # Policy refusals (bad digest, oversized body, HTTPS->HTTP
             # downgrade) are deterministic; retrying cannot help and the
@@ -1183,7 +1262,8 @@ def download_asset(
                 break
             # Keep a verified prefix for the next attempt; a digest failure
             # already deleted it above.
-            time.sleep(min(5.0, 1.5 * attempt))
+            if _pause(min(5.0, 1.5 * attempt), cancel_requested):
+                raise DownloadCancelled(f"download cancelled: {filename}") from None
     assert last_error is not None
     # Name the file and the folder it was meant for: the raw OS error usually
     # only carries errno text, which is useless in the update bar for "disk
