@@ -213,7 +213,14 @@ def parse_page(raw: str, fmt: str = "html") -> Any:
         raise RuleError("empty page cannot be parsed")
     try:
         return lxml_html.fromstring(text)
-    except etree.ParserError as e:
+    except etree.LxmlError as e:
+        # ``ParserError`` (empty document) is only one of the ways lxml
+        # rejects a page: an illegal character (a lone surrogate) raises
+        # ``XMLSyntaxError``, and an XML encoding declaration on a ``str``
+        # raises ``ValueError``.  Both come from page data, so neither may
+        # escape as a non-``RuleError``.
+        raise RuleError(f"unparseable page: {e}") from e
+    except (ValueError, UnicodeError) as e:
         raise RuleError(f"unparseable page: {e}") from e
 
 
@@ -230,11 +237,19 @@ def select(root: Any, selector: str, fmt: str = "html") -> list[Any]:
         return []
     if selector.startswith(("/", "(", "./")):
         try:
-            return list(root.xpath(selector))
-        except etree.XPathError as e:
+            result = root.xpath(selector)
+        except (etree.XPathError, ValueError, TypeError) as e:
+            # ``ValueError`` covers an expression carrying a character lxml
+            # cannot accept (a NUL inside a predicate); ``XPathError`` covers
+            # syntax/evaluation errors.
             raise RuleError(
                 f"invalid selector {_selector_preview(selector)!r}: {e}"
             ) from e
+        # An XPath expression may evaluate to a scalar rather than a node-set
+        # (``(count(//a))`` -> float, ``(string(//a))`` -> str).  ``list()``
+        # over those raises ``TypeError`` or, worse, splits a string into
+        # characters; wrap them as a single value instead.
+        return result if isinstance(result, list) else [result]
     try:
         return list(root.cssselect(selector))
     except Exception as e:  # cssselect raises various errors on bad input
@@ -342,6 +357,16 @@ def node_to_str(node: Any, attr: str) -> str:
         # xpath returned a bare string (e.g. ".../@href" or ".../text()")
         return node.strip()
 
+    if isinstance(node, bool):
+        # An XPath scalar (``(boolean(...))``) is not an element.
+        return "true" if node else "false"
+    if isinstance(node, (int, float)):
+        return str(node)
+    if not hasattr(node, "itertext"):
+        # Any other scalar an XPath expression can yield; stringify it rather
+        # than leaking an ``AttributeError`` from page-driven extraction.
+        return str(node).strip()
+
     if attr == "text":
         return "".join(t.strip() for t in node.itertext() if t and t.strip())
 
@@ -352,7 +377,13 @@ def node_to_str(node: Any, attr: str) -> str:
     if attr == "html":
         return "".join(lxml_html.tostring(child, encoding="unicode") for child in node)
 
-    return (node.get(attr) or "").strip()
+    try:
+        return (node.get(attr) or "").strip()
+    except (TypeError, ValueError):
+        # ``attr`` is rule-supplied and may not be a valid XML name (empty,
+        # NUL, ...).  lxml rejects such a lookup with a bare ``ValueError``;
+        # treat it as an absent attribute, exactly like a miss.
+        return ""
 
 
 def _json_dumps(value: Any) -> str:
@@ -391,9 +422,17 @@ def json_to_str(value: Any, attr: str) -> str:
         return json_to_str(found, "text")
     if isinstance(value, (list, tuple)):
         if attr in ("text", "html"):
-            return "".join(json_to_str(item, "text") for item in value)
+            try:
+                return "".join(json_to_str(item, "text") for item in value)
+            except RecursionError as e:
+                # A list nested deeper than the interpreter's stack (which
+                # ``json.loads`` accepts) cannot be flattened this way.
+                raise RuleError("JSON value is nested too deeply to flatten") from e
         if attr == "inner_text":
-            return "\n".join(json_to_str(item, "text") for item in value)
+            try:
+                return "\n".join(json_to_str(item, "text") for item in value)
+            except RecursionError as e:
+                raise RuleError("JSON value is nested too deeply to flatten") from e
         return _json_dumps(value)
     return str(value)  # pragma: no cover - defensive
 
