@@ -5,6 +5,8 @@
 什么、如何校验与恢复**；完整的选项速查表见
 [CLI 用法 - storage 子命令](./cli-examples.md#storage-subcommand)。
 
+容量规划、备份频率与保留策略见[性能与容量](./performance.md#disk-backup)。
+
 ## 备份覆盖什么 {#what-is-backed-up}
 
 `storage backup` 只备份 `raw_data` 下的章节数据库，不是整机迁移工具：

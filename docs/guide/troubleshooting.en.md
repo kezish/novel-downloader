@@ -2,6 +2,8 @@
 
 This page covers common problems and their diagnosis steps. Commands are run from the project root or in an environment where `novel-cli` is installed; on Windows, Git Bash or PowerShell both work. Replace `<site>`, `<book_id>`, and `<IP>` in the examples with real values.
 
+If the problem is "too slow / too much memory / not enough disk" rather than an error, start with [Performance and Capacity](./performance.en.md).
+
 ---
 
 ## 0. Collect Basic Information First
@@ -721,7 +723,7 @@ python -c "import importlib.util as u; print('mutagen', bool(u.find_spec('mutage
 
 ---
 
-## 7. Proxy / VPN Causes Timeouts or SSL Errors
+## 7. Proxy / VPN Causes Timeouts or SSL Errors {#proxy-vpn}
 
 **Symptoms**: every site times out, SSL certificate errors appear, or behavior changes when a VPN is enabled or disabled.
 
@@ -1159,7 +1161,7 @@ novel-cli storage backup --out ~/novel-backups --keep 7
 
 ---
 
-## 16. Music Download Reports a Track / Batch Size Limit
+## 16. Music Download Reports a Track / Batch Size Limit {#music-size-limit}
 
 **Symptoms**: a track's result or the batch summary shows `单曲超过大小上限（1.0GB），已删除不完整文件` ("track exceeds the size limit, incomplete file deleted"); or the batch starts failing after a few tracks with `整批下载超过大小上限（8.0GB），已删除不完整文件` ("batch exceeds the size limit, incomplete file deleted").
 

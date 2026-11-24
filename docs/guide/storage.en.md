@@ -6,6 +6,9 @@ databases. This page explains **what a backup actually contains, what happens on
 failure, and how to verify and restore**; the complete option reference lives in
 [CLI Usage - storage subcommand](./cli-examples.en.md#storage-subcommand).
 
+Capacity planning, backup frequency, and retention are covered in
+[Performance and Capacity](./performance.en.md#disk-backup).
+
 ## What is backed up {#what-is-backed-up}
 
 `storage backup` backs up only the chapter databases under `raw_data`. It is not a

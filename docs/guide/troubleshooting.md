@@ -2,6 +2,8 @@
 
 下面是常见问题的排查步骤。命令默认在项目根目录或已安装 `novel-cli` 的环境中执行；Windows 下可使用 Git Bash 或 PowerShell。示例中的 `<site>`、`<book_id>`、`<IP>` 需要替换为实际值。
 
+如果问题是「太慢 / 太占内存 / 磁盘不够」而不是报错，先看[性能与容量](./performance.md)。
+
 ---
 
 ## 0. 先收集基本信息
@@ -618,7 +620,7 @@ python -c "import importlib.util as u; print('mutagen', bool(u.find_spec('mutage
 
 ---
 
-## 7. 代理 / VPN 导致超时或 SSL 错误
+## 7. 代理 / VPN 导致超时或 SSL 错误 {#proxy-vpn}
 
 **现象**：所有站点都超时、出现 SSL 证书错误，或开启/关闭 VPN 后行为不一致。
 
@@ -1005,7 +1007,7 @@ novel-cli storage backup --out ~/novel-backups --keep 7
 
 ---
 
-## 16. 音乐下载提示「单曲 / 整批超过大小上限」
+## 16. 音乐下载提示「单曲 / 整批超过大小上限」 {#music-size-limit}
 
 **现象**：某首歌在逐曲结果或批量汇总里显示 `单曲超过大小上限（1.0GB），已删除不完整文件`；或整批在若干首之后开始失败，并显示 `整批下载超过大小上限（8.0GB），已删除不完整文件`。
 
