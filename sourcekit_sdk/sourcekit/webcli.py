@@ -65,10 +65,14 @@ def main():
     p=argparse.ArgumentParser();p.add_argument("--build",default=str(ROOT/"build"))
     sub=p.add_subparsers(dest="command",required=True)
     s=sub.add_parser("search");s.add_argument("keyword");s.add_argument("--sites",nargs="+",choices=list(SITES),required=True);s.add_argument("--cursors",default="{}")
+    m=sub.add_parser("metadata");m.add_argument("url")
     d=sub.add_parser("download");d.add_argument("url");d.add_argument("--output-dir",required=True);d.add_argument("--cache-dir",required=True)
     a=p.parse_args()
     register_sources(a.build)
     if a.command=="search":print(json.dumps(asyncio.run(query(a.keyword,a.sites,json.loads(a.cursors))),ensure_ascii=False));return 0
+    if a.command=="metadata":
+        from .metadata import metadata
+        print(json.dumps(asyncio.run(metadata(a.url)),ensure_ascii=False));return 0
     return asyncio.run(download(a.url,a.output_dir,a.cache_dir))
 if __name__=="__main__":
     try:raise SystemExit(main())

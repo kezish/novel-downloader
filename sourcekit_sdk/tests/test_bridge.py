@@ -161,3 +161,13 @@ def test_pagination_error_is_not_completion(bundle,monkeypatch):
     f=registrar.get_fetcher("sk_biquge5",FetcherConfig())
     with pytest.raises(RuntimeError,match="fixture page failed"):
         asyncio.run(f.fetch_chapter_content("123","101"))
+
+
+def test_metadata_without_catalog(bundle):
+    from sourcekit.metadata import extract_metadata
+    cz=extract_metadata("sk_czbooks",'<div class="info"><h1 class="title">測試</h1><span class="author"><a>作者</a></span></div><div class="description">简介<br>第二行</div>')
+    assert cz["title"]=="測試" and "第二行" in cz["description"]
+    b=extract_metadata("sk_biquge5",'<meta property="og:novel:book_name" content="测试"><meta property="og:description" content="测试简介">')
+    assert b["description"]=="测试简介"
+    import pytest
+    with pytest.raises(ValueError):extract_metadata("sk_czbooks","<html>error</html>")
