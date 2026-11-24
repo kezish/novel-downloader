@@ -100,6 +100,19 @@ class ReadingPageParser(RuleParser):
 class CzbooksSearcher(RuleSearcher):
     @property
     def nsfw(self):return True
+    async def _fetch_html(self,keyword):
+        from urllib.parse import quote
+        url="https://czbooks.net/s/"+quote(keyword,safe="")
+        self._request_url=url
+        self._final_url=""
+        async with self.session.get(url,params={"q":keyword},allow_redirects=False) as response:
+            if response.status==403 and response.headers.get("cf-mitigated","").lower()=="challenge":
+                raise RuntimeError("CZBOOKS_CHALLENGE: original site requires browser verification")
+            response.raise_for_status()
+            if response.status!=200:
+                raise RuntimeError(f"CZBOOKS_HTTP_{response.status}")
+            return await self._text_of(response)
+
 def plugin_classes(item):
     rule=parse_rule(item["rule"],source=item["id"]); key=item["id"];ext=item["extension"]
     fb=ReadingPageFetcher if ext=="reading_pages" else RuleFetcher
