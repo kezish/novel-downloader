@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "sk_shuku52",
+  "backend": "plugin",
+  "rule": {
+    "site_name": "52书库 (SourceKit)",
+    "base_url": "https://www.52shuku.net",
+    "hosts": [
+      "www.52shuku.net",
+      "52shuku.net"
+    ],
+    "search": {
+      "url": "{base_url}/so/search.php?q={keyword}",
+      "item": "article.excerpt",
+      "fields": {
+        "title": {
+          "selector": "header h2 a h4",
+          "attr": "text",
+          "fallback": [
+            "h2 a"
+          ]
+        },
+        "url": {
+          "selector": "header h2 a",
+          "attr": "href",
+          "fallback": [
+            "h2 a"
+          ]
+        }
+      }
+    },
+    "book": {
+      "url": "{base_url}/{book_id}",
+      "fields": {
+        "book_name": {
+          "selector": "h1.article-title",
+          "attr": "text"
+        },
+        "summary": {
+          "selector": "article.article-content p:nth-of-type(2)",
+          "attr": "inner_text"
+        }
+      },
+      "chapters": {
+        "item": "li.mulu a[href]",
+        "id_regex": "_([0-9]+)\\.html(?:[?#].*)?$"
+      }
+    },
+    "chapter": {
+      "url": "{base_url}/{book_id}/{chapter_id}",
+      "content": {
+        "selector": "article.article-content",
+        "attr": "inner_text",
+        "fallback": [
+          "#nr1"
+        ]
+      },
+      "drop": [
+        "^目录\\s+上一页",
+        "^.*52书库App.*$",
+        "^小贴士.*52书库.*$",
+        "^哦豁.*52书库.*$"
+      ]
+    }
+  },
+  "extension": "reading_pages"
+}

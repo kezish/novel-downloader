@@ -1,0 +1,121 @@
+{
+  "encoding": "utf-8",
+  "priority": 45,
+  "search": {
+    "url": "{base_url}/search.php?q={keyword}",
+    "method": "GET",
+    "item": "div.col-12.col-md-6 dl",
+    "priority": 45,
+    "book_id_regex": "/([\\d_]+)/?(?:[?#].*)?$",
+    "fields": {
+      "title": {
+        "selector": "dd h3 a",
+        "attr": "text"
+      },
+      "url": {
+        "selector": "dt a",
+        "attr": "href",
+        "fallback": [
+          "dd h3 a"
+        ]
+      },
+      "cover": {
+        "selector": "dt a img",
+        "attr": "src"
+      },
+      "author": {
+        "selector": "dd.book_other span",
+        "attr": "text"
+      },
+      "latest": {
+        "selector": "dd.book_other a",
+        "attr": "text"
+      },
+      "update": {
+        "attr": "text",
+        "regex": "更新时间：\\s*(.+?)(?=最新章节：|$)",
+        "group": 1
+      }
+    }
+  },
+  "book": {
+    "url": "{base_url}/{book_id}/",
+    "pages": {
+      "url": "{base_url}/{book_id}/index_{page}.html",
+      "start": 2
+    },
+    "fields": {
+      "book_name": {
+        "selector": "meta[property='og:novel:book_name']",
+        "attr": "content"
+      },
+      "author": {
+        "selector": "meta[property='og:novel:author']",
+        "attr": "content"
+      },
+      "cover_url": {
+        "selector": "meta[property='og:image']",
+        "attr": "content"
+      },
+      "update_time": {
+        "selector": "meta[property='og:novel:update_time']",
+        "attr": "content"
+      },
+      "serial_status": {
+        "selector": "meta[property='og:novel:status']",
+        "attr": "content"
+      },
+      "summary": {
+        "selector": "meta[property='og:description']",
+        "attr": "content"
+      },
+      "tags": {
+        "selector": "meta[property='og:novel:category']",
+        "attr": "content",
+        "multi": true
+      }
+    },
+    "chapters": {
+      "item": "div.book_list2 a",
+      "title": {
+        "attr": "text"
+      },
+      "url": {
+        "attr": "href",
+        "regex": "^([^?#]+)",
+        "group": 1
+      },
+      "id_regex": "([^/?#]+?)\\.[^/?#]*(?:[?#].*)?$"
+    }
+  },
+  "chapter": {
+    "url": "{base_url}/{book_id}/{chapter_id}.html",
+    "pages": {
+      "url": "{base_url}/{book_id}/{chapter_id}_{page}.html",
+      "start": 2
+    },
+    "title": {
+      "selector": "h1",
+      "attr": "text",
+      "regex": "^(.+?)\\s*[-—]\\s*《",
+      "group": 1
+    },
+    "content": {
+      "selector": "article",
+      "attr": "inner_text"
+    },
+    "replace": [
+      [
+        " ",
+        ""
+      ]
+    ],
+    "drop": [
+      "^第\\(\\d+/\\d+\\)页$"
+    ]
+  },
+  "resolve": {
+    "book": "^/([\\d_]+)/?$",
+    "chapter": "^/([\\d_]+)/(\\d+)\\.html$"
+  }
+}
