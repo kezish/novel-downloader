@@ -1,3 +1,23 @@
+## v1.41.0 (2026-11-25)
+
+API 压缩、桌面最近搜索与 CLI 表格健壮性。
+
+### Feature
+
+- **API gzip**：`/api/v1` JSON 响应在客户端允许时压缩（≥1 KiB，2xx）；SSE/下载/304/HEAD 不压缩；所有响应带 `Vary: Accept-Encoding`；ETag 基于未压缩字节，gzip/identity 共用同一 ETag；embedded 保留压缩后 `Content-Length`
+- **桌面最近搜索**：搜索框下显示最近 10 条 chips（去重置顶、200 字符、空白折叠），点击按当前条件重搜；清空入口；存 `desktop_prefs.json` 的 `search_history`，不参与导出
+- **CLI 表格**：`COLUMNS` 极小值不再产生空表；单元格内 ANSI/OSC 序列在排版前剥离，避免颜色注入与边框错位
+
+### Fix
+
+- **API 测试适配**：压缩后客户端测试移除已解码响应的 `Content-Encoding`，避免二次解压
+- **桌面 XSS**：最近搜索 chips 渲染纳入 sink 清单，模板统一 `esc()`
+
+### Test
+
+- Python **15669 passed / 63 skipped**；ruff/format、mypy 全绿
+- 新增 66 例压缩、34 例桌面搜索历史、32 例表格宽度矩阵
+
 ## v1.40.0 (2026-11-24)
 
 Android 引擎容错、follow JSON 与配置/规则健壮性。
