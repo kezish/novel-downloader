@@ -3619,6 +3619,33 @@ msgstr "搜索后在这里显示结果"
 msgid "Type a title, or browse the rankings and categories"
 msgstr "输入书名，或先看看排行榜和分类"
 
+#: src/novel_downloader/apps/desktop/webview_app.py:932
+msgid "Recent searches"
+msgstr "最近搜索"
+
+#: src/novel_downloader/apps/desktop/webview_app.py:933
+msgid "Clear recent searches"
+msgstr "清空最近搜索"
+
+#: src/novel_downloader/apps/desktop/webview_app.py:934
+#, python-brace-format
+msgid "Search for {query}"
+msgstr "搜索“{query}”"
+
+#: src/novel_downloader/apps/desktop/webview_app.py:935
+msgid "Recent searches cleared"
+msgstr "已清空最近搜索"
+
+#: src/novel_downloader/apps/desktop/webview_app.py:936
+#: src/novel_downloader/apps/desktop/webview_app.py:5492
+msgid "Could not clear the recent searches"
+msgstr "无法清空最近搜索"
+
+#: src/novel_downloader/apps/desktop/webview_app.py:937
+#: src/novel_downloader/apps/desktop/webview_app.py:5473
+msgid "Could not save the recent searches"
+msgstr "无法保存最近搜索"
+
 #: src/novel_downloader/apps/desktop/webview_app.py:931
 msgid "Source"
 msgstr "来源"

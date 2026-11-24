@@ -928,6 +928,13 @@ def _i18n_catalog() -> dict[str, str]:
         "Type a title, or browse the rankings and categories": t(
             "Type a title, or browse the rankings and categories"
         ),
+        # recent searches: runtime state shown under the search box
+        "Recent searches": t("Recent searches"),
+        "Clear recent searches": t("Clear recent searches"),
+        "Search for {query}": t("Search for {query}"),
+        "Recent searches cleared": t("Recent searches cleared"),
+        "Could not clear the recent searches": t("Could not clear the recent searches"),
+        "Could not save the recent searches": t("Could not save the recent searches"),
         "Source": t("Source"),
         "Remove": t("Remove"),
         "Follow": t("Follow"),
@@ -2563,6 +2570,129 @@ def _stored_search_sort(prefs: Mapping[str, Any]) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# recent searches (runtime state, not exported)
+# ---------------------------------------------------------------------------
+
+#: Number of recent search terms kept; the oldest one is evicted first.
+#:
+#: The history lives in ``desktop_prefs.json`` under the ``search_history``
+#: key, next to the other desktop preferences.  That reuses the file's
+#: cross-process lock, its temp-file + ``os.replace`` atomic write and its
+#: corrupt-file quarantine instead of maintaining a second on-disk contract.
+#: It is *not* in :data:`_SETTINGS_FILE_KEYS`: exporting it would carry what
+#: the user searched for to another machine without any benefit, so it stays
+#: device-local runtime state like the window geometry.
+_MAX_SEARCH_HISTORY_ENTRIES = 10
+#: Longest term persisted; the search field is single-line, so this is ample.
+_MAX_SEARCH_HISTORY_QUERY_CHARS = 200
+_SEARCH_HISTORY_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalise_search_query(raw: object) -> str:
+    """
+    Trimmed, whitespace-collapsed form of ``raw``; empty when nothing remains.
+
+    Only strings are accepted: a number/object in a hand-edited pref file is
+    not a search the user typed, so it is dropped rather than coerced to text.
+    """
+    if not isinstance(raw, str):
+        return ""
+    collapsed = _SEARCH_HISTORY_WHITESPACE_RE.sub(" ", raw.strip())
+    return collapsed[:_MAX_SEARCH_HISTORY_QUERY_CHARS].strip()
+
+
+def _search_history_timestamp(value: object) -> int:
+    """Coerce a stored timestamp to a non-negative integer (epoch millis)."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, str):
+        try:
+            return max(int(value.strip()), 0)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _sanitize_search_history(
+    entries: object,
+    max_entries: int = _MAX_SEARCH_HISTORY_ENTRIES,
+) -> list[dict[str, Any]]:
+    """
+    Validate, normalise, order, de-duplicate and cap a stored history value.
+
+    Decoding is per-entry: a hand-edited or truncated preference file must not
+    discard the whole list, and a completely corrupt value (not a list, or a
+    list of non-objects) decodes to an empty list instead of raising into the
+    search page.
+
+    Terms are compared case-insensitively so ``Harry`` and ``harry`` are one
+    entry (the most recent spelling wins).  ``sorted`` is stable, so entries
+    with the same timestamp keep their incoming newest-first order.
+    """
+    if not isinstance(entries, list):
+        return []
+    normalised: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        query = _normalise_search_query(entry.get("query"))
+        if not query:
+            continue
+        normalised.append(
+            {
+                "query": query,
+                "searched_at": _search_history_timestamp(entry.get("searched_at")),
+            }
+        )
+    normalised.sort(key=lambda item: item["searched_at"], reverse=True)
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for item in normalised:
+        key = item["query"].casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+        if len(result) >= max(0, max_entries):
+            break
+    return result
+
+
+def _record_search_history(
+    entries: object,
+    query: object,
+    now_millis: int,
+    max_entries: int = _MAX_SEARCH_HISTORY_ENTRIES,
+) -> list[dict[str, Any]]:
+    """
+    Return the list with ``query`` recorded at ``now_millis`` (newest first).
+
+    Re-searching an existing term moves it to the front instead of duplicating
+    it; a blank query leaves the list unchanged.
+    """
+    current = _sanitize_search_history(entries, max_entries)
+    text = _normalise_search_query(query)
+    if not text:
+        return current
+    return _sanitize_search_history(
+        [{"query": text, "searched_at": max(int(now_millis), 0)}, *current],
+        max_entries,
+    )
+
+
+def _stored_search_history(prefs: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The persisted recent searches, already validated and capped."""
+    return _sanitize_search_history(prefs.get("search_history"))
+
+
+def _now_millis() -> int:
+    """Current wall-clock time as epoch milliseconds (matches the Android store)."""
+    return int(time.time() * 1000)
+
+
+# ---------------------------------------------------------------------------
 # settings export / import (preferences only; never credentials)
 # ---------------------------------------------------------------------------
 
@@ -2583,6 +2713,8 @@ _SETTINGS_FILE_MAX_BYTES = 1_048_576
 #: file shared with the CLI rather than in the desktop prefs, so they are
 #: intentionally absent here: exporting them would duplicate the source of
 #: truth and force a schema-version bump that invalidates older exports.
+#: Recent searches (``search_history``) also live in the prefs file but are
+#: device-local runtime state; see :data:`_MAX_SEARCH_HISTORY_ENTRIES`.
 _SETTINGS_FILE_KEYS: tuple[str, ...] = (
     "theme",
     *_PREF_BOOL_KEYS,
@@ -3317,6 +3449,9 @@ class ApiBridge:
             "search_filters": _stored_search_filters(prefs),
             # The last sort selection; always a complete, validated pair.
             "search_sort": _stored_search_sort(prefs),
+            # Recent search terms, newest first, already validated.  Runtime
+            # state: it is shown as chips and never exported.
+            "search_history": _stored_search_history(prefs),
             "language": _active_language(),
             "languages": languages,
             "sites": {
@@ -5288,6 +5423,73 @@ class ApiBridge:
             "ok": ok,
             "filters": {},
             "error": None if ok else t("Could not save the settings"),
+        }
+
+    def get_search_history(self) -> dict[str, Any]:
+        """
+        The recent search terms, newest first (never raises).
+
+        :return: ``{"ok", "history", "error"}``; ``history`` is a list of
+            ``{"query", "searched_at"}`` objects, already normalised, deduped
+            and capped by the bridge.
+        """
+        try:
+            return {
+                "ok": True,
+                "history": _stored_search_history(_load_prefs()),
+                "error": None,
+            }
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.debug("Could not read the search history", exc_info=True)
+            return {"ok": False, "history": [], "error": format_error(exc)}
+
+    def record_search_history(self, query: str) -> dict[str, Any]:
+        """
+        Record a search that actually ran.
+
+        The page calls this only after the backend accepted a non-blank query
+        and returned a search id, so a blank box, an invalid filter or a
+        cancelled request never creates an entry.  A blank ``query`` is a
+        no-op that still answers the current list.  Re-recording an existing
+        term moves it to the front (case-insensitively) and the list is capped
+        at :data:`_MAX_SEARCH_HISTORY_ENTRIES`.
+
+        The write reuses the preference file's cross-process lock, atomic
+        replace and corrupt-file quarantine.  A failed write leaves the old
+        list on disk and reports ``ok: False`` instead of raising.
+
+        :return: ``{"ok", "history", "error"}``.  Never raises.
+        """
+        try:
+            current = _stored_search_history(_load_prefs())
+            text = _normalise_search_query(query)
+            if not text:
+                return {"ok": True, "history": current, "error": None}
+            history = _record_search_history(current, text, _now_millis())
+            ok = _save_prefs({"search_history": history}) is not False
+            return {
+                "ok": ok,
+                "history": history,
+                "error": None if ok else t("Could not save the recent searches"),
+            }
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.debug("Could not record the search history", exc_info=True)
+            return {"ok": False, "history": [], "error": format_error(exc)}
+
+    def clear_search_history(self) -> dict[str, Any]:
+        """
+        Forget every recent search term (the chips-row action).
+
+        The key is removed rather than rewritten as an empty list, so a
+        cleared history leaves no trace in the preference file.
+
+        :return: ``{"ok", "history" (always empty), "error"}``.  Never raises.
+        """
+        ok = _remove_prefs_keys("search_history") is not False
+        return {
+            "ok": ok,
+            "history": [],
+            "error": None if ok else t("Could not clear the recent searches"),
         }
 
     def reset_window_state(self) -> dict[str, Any]:

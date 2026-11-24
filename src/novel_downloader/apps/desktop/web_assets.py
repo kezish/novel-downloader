@@ -438,6 +438,23 @@ select.picker:focus-visible { outline: 2px solid var(--focus); outline-offset: 1
 .search-applied { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 2px 0; font-size: 12px; color: var(--text-2); }
 .search-applied[hidden] { display: none; }
 .search-applied .hint { flex: 1 1 220px; min-width: 0; }
+/* Recent searches: a compact chip row directly under the search box. Each
+   chip is a real <button>, so Tab reaches it and Enter/Space runs the search;
+   the [hidden] rule is needed because the flex display would otherwise
+   override the attribute when the list is empty. */
+.search-history { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.search-history[hidden] { display: none; }
+.search-history-label { flex: none; }
+.search-history-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; flex: 1 1 auto; min-width: 0; }
+.history-chip {
+  font: inherit; font-size: 12px; line-height: 1.4;
+  color: var(--text-2); background: var(--card-2);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 3px 10px; max-width: 22ch; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.history-chip:hover { border-color: var(--border-strong); color: var(--text); }
+.history-chip:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .hint { font-size: 11.5px; color: var(--text-3); }
 .spin {
   width: 14px; height: 14px; border-radius: 50%; flex: none;
@@ -861,6 +878,11 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
             </div>
             <button class="btn btn-primary btn-lg" id="btn-search"><span class="spin" id="search-spin" aria-hidden="true"></span><svg class="icon"><use href="#i-search"/></svg><span data-i18n="Search">Search</span></button>
             <button class="btn btn-ghost btn-lg" id="btn-search-cancel" hidden><svg class="icon"><use href="#i-x"/></svg><span data-i18n="Cancel">Cancel</span></button>
+          </div>
+          <div class="search-history" id="search-history" hidden>
+            <span class="hint search-history-label" id="search-history-label" data-i18n="Recent searches">Recent searches</span>
+            <div class="search-history-chips" id="search-history-chips" role="group" aria-labelledby="search-history-label"></div>
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-clear-history"><svg class="icon"><use href="#i-x"/></svg><span data-i18n="Clear recent searches">Clear recent searches</span></button>
           </div>
           <div class="search-progress" id="search-progress" role="status" aria-live="polite" hidden><span id="search-progress-text"></span></div>
           <div class="filters">
@@ -2252,6 +2274,10 @@ let activeSearchId = "";
 /* JSON key of the filters attached to the running search. A repeated search
    with the same keyword but different filters must supersede the old one. */
 let activeSearchFilterKey = "";
+/* Recent search terms, newest first: { query, searched_at }. The bridge is the
+   source of truth; this copy only feeds the chip row and is replaced by every
+   record/clear answer. */
+let searchHistory = [];
 /* Aggregate searches can return hundreds of rows. Only one screenful is
    built up front; "Show more" appends the next batch. ``data-sel`` always
    holds the index into ``lastResults``, so selection stays global. */
@@ -2719,6 +2745,10 @@ async function doSearch() {
     if (job && job.error) throw new Error(job.error);
     if (!job || !job.search_id) throw new Error(t("Search failed"));
     activeSearchId = job.search_id;
+    // The query really ran (the backend returned a search id); remember it
+    // for the chips row. A superseded request returned above, so a cancelled
+    // search cannot claim the slot.
+    rememberSearch(kw);
     for (;;) {
       // Poll while the sites answer: the fastest ones land in ~0.2s instead
       // of the page waiting for the slowest (bounded by the bridge budget).
@@ -2768,6 +2798,74 @@ async function doSearch() {
     if (token === searchSeq) endSearchUi();
   }
 }
+/* ========================================================== recent searches */
+/* The bridge owns the stored list. The helpers below mirror its validation
+   (trim, collapse whitespace runs, 200-char cap, 10 entries, case-insensitive
+   de-duplication) so a bridge answer can be painted without a second pass. */
+const SEARCH_HISTORY_LIMIT = 10;
+const SEARCH_HISTORY_QUERY_CHARS = 200;
+function normaliseHistoryQuery(raw) {
+  const text = String(raw == null ? "" : raw).replace(/\s+/g, " ").trim();
+  return text.slice(0, SEARCH_HISTORY_QUERY_CHARS).trim();
+}
+function normaliseHistory(entries) {
+  const seen = new Set();
+  const out = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const query = normaliseHistoryQuery(entry && entry.query);
+    if (!query) continue;
+    const key = query.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ query, searched_at: Number(entry.searched_at) || 0 });
+    if (out.length >= SEARCH_HISTORY_LIMIT) break;
+  }
+  return out;
+}
+function renderSearchHistory() {
+  const box = $("#search-history");
+  const chips = $("#search-history-chips");
+  if (!box || !chips) return;
+  box.hidden = searchHistory.length === 0;
+  chips.innerHTML = searchHistory.map(entry =>
+    `<button type="button" class="history-chip" data-history-query="${esc(entry.query)}" aria-label="${esc(t("Search for {query}").replace("{query}", entry.query))}">${esc(entry.query)}</button>`
+  ).join("");
+}
+function applySearchHistory(entries) {
+  searchHistory = normaliseHistory(entries);
+  renderSearchHistory();
+}
+/* Called only after the backend accepted the search and returned an id, so a
+   blank box, a rejected filter or a cancelled request never creates an entry.
+   Fire-and-forget: a read-only profile must not fail the search itself. */
+function rememberSearch(query) {
+  if (!normaliseHistoryQuery(query)) return;
+  api("record_search_history", query).then(res => {
+    if (res && Array.isArray(res.history)) applySearchHistory(res.history);
+  }).catch(() => {});
+}
+/* Each chip is a native <button>: clicking it, or pressing Enter/Space while
+   it has focus, fills the search box and runs the search immediately. */
+$("#search-history-chips").addEventListener("click", e => {
+  const chip = e.target.closest("[data-history-query]");
+  if (!chip) return;
+  $("#q").value = chip.dataset.historyQuery;
+  $("#q").focus();
+  doSearch();
+});
+$("#btn-clear-history").onclick = async () => {
+  const res = await call("clear_search_history");
+  if (!res) return;
+  if (res.ok) {
+    applySearchHistory([]);
+    // The button just disappeared with the row; keep keyboard focus in the
+    // search flow instead of dropping it on <body>.
+    $("#q").focus();
+    toast(t("Recent searches cleared"), "ok");
+  } else {
+    toast(res.error || t("Could not clear the recent searches"), "err");
+  }
+};
 /* match-telemetry-start */
 function matchTierLabel(tier) {
   switch (tier) {
@@ -4229,6 +4327,9 @@ function boot() {
     // Restore the last sort selection without starting a search either; an
     // invalid stored pair has already been normalised by the bridge.
     applyStoredSearchSort(state.search_sort);
+    // Recent searches are a convenience chip row, not a search: paint what the
+    // bridge validated and leave the box empty.
+    applySearchHistory(state.search_history);
     if (state.is_frozen && !state.shortcut_exists) {
       setTimeout(() => toast(t("Click here to create a desktop shortcut"), "info", 6000), 1200);
     }
