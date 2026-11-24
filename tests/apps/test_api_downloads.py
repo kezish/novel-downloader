@@ -856,7 +856,9 @@ def test_embedded_differences_from_rest_are_recorded(
     """
     Documented gaps of the stdlib engine.
 
-    * no ``Cache-Control`` (native clients, no HTTP cache);
+    * no ``Cache-Control`` on the served file (the API tree and
+      ``/downloads`` *errors* use the shared REST policy; a successful export
+      does not, while REST sends ``public, max-age=3600``);
     * no ``Range`` support and no ``Accept-Ranges`` advertisement;
     * always ``application/octet-stream`` and an ``attachment`` disposition;
     * ``/downloads`` (no trailing slash) is a 405 there, a 307 redirect in

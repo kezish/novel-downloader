@@ -1243,12 +1243,17 @@ JSON 响应**不**带 CSP。
 | 路径 | 值 |
 | --- | --- |
 | `/api/v1/sites`、`/api/v1/history`、`/api/v1/music/platforms` | `private, max-age=60` |
-| `/api/v1/tasks*`、`/api/v1/login/requests`、`/api/v1/music/jobs*` 等实时数据 | `no-store` |
+| `/api/v1` 中上述参考端点以外的所有成功响应：`/tasks*`、`/login*`、`/music/jobs*`、`/watchlist*`、`/health` 等 | `no-store` |
 | 任意 `4xx` / `5xx` 错误 | `no-store` |
 | `/downloads/*` | `public, max-age=3600` |
 
 SSE 端点自己设置的 `Cache-Control: no-cache` 不会被覆盖。`/docs`、`/redoc`、
 `/openapi.json` 不在上述前缀内，不加这些头。
+
+这张表由两端共用（`apps/common/cache_policy.py`）：REST 经
+`CacheControlMiddleware` 应用，内嵌引擎在 `_send_json` 中应用同一份规则，
+因此同一路径、同一状态码得到同一个指令（内嵌引擎的唯一差异见下文）。
+依据是路径与状态码，不区分 GET/HEAD；`304` 保留对应 `200` 的指令。
 
 ### 条件请求（ETag / If-None-Match） {#conditional-requests}
 
@@ -1363,15 +1368,21 @@ curl 不发 `Origin`，不受影响。
     内嵌引擎**没有 CORS 层**：它只绑定 `127.0.0.1`、只服务原生客户端，因此
     不发送任何 `Access-Control-*` 头，浏览器也无法跨源读取它的响应。它同样
     带 `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、
-    `X-Request-ID`，以及 `/downloads` 的 sandbox CSP。三个参考端点
-    （`/sites`、`/history`、`/music/platforms`）与 REST 一样带强 `ETag` 与
-    `Cache-Control: private, max-age=60`，匹配的 `If-None-Match` 同样返回
-    `304`；其余 REST 缓存策略（实时数据的 `no-store`、`/downloads` 的
-    `public`）仍未实现（原生客户端不经过 HTTP 缓存）。JSON 响应同样支持
-    gzip：阈值、`Vary: Accept-Encoding`（`304` 也带）和「`ETag` 基于未压缩
-    表示」的规则与 REST 一致，`/downloads` 文件不压缩。内嵌引擎没有 SSE
-    端点，因此不存在 SSE 压缩问题。若将来让浏览器访问
-    内嵌端口，需要先补上 CORS 与这部分策略。
+    `X-Request-ID`，以及 `/downloads` 的 sandbox CSP。缓存策略与 REST 共用
+    同一张表（`apps/common/cache_policy.py`，在 `_send_json` 统一应用）：
+    三个参考端点（`/sites`、`/history`、`/music/platforms`）带强 `ETag` 与
+    `Cache-Control: private, max-age=60`，匹配的 `If-None-Match` 返回 `304`
+    且保留缓存头；`/tasks*`、`/login*`、`/music/jobs*` 与其余 `/api/v1`
+    成功响应为 `no-store`；**所有** `4xx`/`5xx` 为 `no-store`；
+    `/api/v1` 与 `/downloads` 之外的路径不加该头。HEAD 由引擎按 GET 应答
+    （REST 的 `/api/v1` 路由不注册 HEAD，返回带 `no-store` 的 `405`）。
+    唯一保留的差异是**成功的** `/downloads` 文件响应：REST 为
+    `public, max-age=3600`，引擎服务的是应用私有的导出目录，保持历史响应头
+    （不带 `Cache-Control`）；`/downloads` 的错误仍是 `no-store`，与 REST
+    一致。JSON 响应同样支持 gzip：阈值、`Vary: Accept-Encoding`（`304` 也带）
+    和「`ETag` 基于未压缩表示」的规则与 REST 一致，`/downloads` 文件不压缩。
+    内嵌引擎没有 SSE 端点，因此不存在 SSE 压缩问题。若将来让浏览器访问
+    内嵌端口，仍需补上 CORS。
 
 ## 错误码
 

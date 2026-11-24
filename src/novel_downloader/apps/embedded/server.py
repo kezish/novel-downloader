@@ -47,10 +47,18 @@ Contract parity with the REST API
 * The reference endpoints (``GET /sites``, ``/history``, ``/music/platforms``)
   send the same strong ``ETag`` as REST and answer a matching
   ``If-None-Match`` with ``304`` (no body), so a polling client revalidates
-  without transferring the payload. They also carry the REST
-  ``Cache-Control: private, max-age=60``; the rest of the REST cache policy
-  is still not implemented here (native clients do not sit behind an HTTP
-  cache). Live and credential-bearing routes never receive a validator.
+  without transferring the payload. Live and credential-bearing routes never
+  receive a validator.
+* ``Cache-Control`` follows the same table as REST
+  (``apps.common.cache_policy``, applied in ``_send_json``):
+  ``private, max-age=60`` on the three reference endpoints, ``no-store`` for
+  ``/tasks*``, ``/login*``, ``/music/jobs*`` and every other ``/api/v1``
+  success, ``no-store`` for *every* ``4xx``/``5xx`` response, and nothing
+  outside ``/api/v1`` and ``/downloads``. A ``304`` keeps the directive of
+  the ``200`` it replaces (``ETag``/``Vary`` included). The one deliberate
+  difference is a successful ``/downloads`` file: the engine serves its
+  app-private export directory to native clients and keeps its historical
+  header set, while REST advertises ``public, max-age=3600``.
 * JSON responses of at least 1 KiB are gzipped when the request sends
   ``Accept-Encoding: gzip`` (``q=0`` refuses it), mirroring the REST
   transport. ``Vary: Accept-Encoding`` is sent on every JSON response,
@@ -111,6 +119,7 @@ from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse, urlsplit
 
+from novel_downloader.apps.common.cache_policy import cache_control_for
 from novel_downloader.apps.common.compression import (
     COMPRESSION_MIN_BYTES,
     accepts_gzip,
@@ -269,10 +278,11 @@ _SECURITY_HEADERS = (
 #: script on the engine's own origin.
 _DOWNLOADS_CSP = "sandbox; default-src 'none'"
 
-#: ``Cache-Control`` for the reference endpoints that also carry an ``ETag``
-#: (mirrors ``api.middleware.CACHE_CONTROL_PRIVATE``). Only those endpoints
-#: opt in; the rest of the REST cache policy is still not implemented here.
-_CACHE_CONTROL_PRIVATE = "private, max-age=60"
+#: ``Cache-Control`` policy shared with the REST transport
+#: (``apps.common.cache_policy``): ``private, max-age=60`` for the reference
+#: endpoints that also carry an ``ETag``, ``no-store`` for task/login/job
+#: state and for every error, and no directive outside ``/api/v1`` and
+#: ``/downloads``. Applied centrally in :meth:`_Handler._send_json`.
 
 #: Environment variable carrying the per-process bearer token.
 #:
@@ -3234,16 +3244,41 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- helpers ----------------------------------------------------------
 
+    def _request_path(self) -> str:
+        """The request path without its query, for path-based policies."""
+        # ``send_error`` can run before ``parse_request`` assigned ``path``.
+        try:
+            return urlsplit(getattr(self, "path", "")).path or "/"
+        except ValueError:  # pragma: no cover - urlsplit is effectively total
+            return "/"
+
     def _send_json(
         self,
         payload: Any,
         status: int = 200,
         extra_headers: dict[str, str] | None = None,
         *,
-        cache_control: str | None = None,
         enable_etag: bool = False,
     ) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        # The REST cache policy (``apps.common.cache_policy``) is resolved
+        # centrally here so a new route cannot silently opt out: a route-set
+        # ``Cache-Control`` (an SSE-style ``no-cache``) wins, everything else
+        # is stamped by path and status.
+        extra = dict(extra_headers or {})
+        cache_control = next(
+            (value for name, value in extra.items() if name.lower() == "cache-control"),
+            None,
+        )
+        if cache_control is None:
+            cache_control = cache_control_for(self._request_path(), status)
+        else:
+            # Never emit the header twice; the route's value is authoritative.
+            extra = {
+                name: value
+                for name, value in extra.items()
+                if name.lower() != "cache-control"
+            }
         etag: str | None = None
         if (
             enable_etag
@@ -3286,7 +3321,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Vary", "Accept-Encoding")
         if compressed:
             self.send_header("Content-Encoding", "gzip")
-        for name, value in (extra_headers or {}).items():
+        for name, value in extra.items():
             self.send_header(name, value)
         if cache_control:
             self.send_header("Cache-Control", cache_control)
@@ -3529,15 +3564,15 @@ class _Handler(BaseHTTPRequestHandler):
                 self._drain_body(path)
                 body = {}
             # Same conditional-GET policy as the REST transport: a plain GET
-            # on a reference endpoint gets a strong ETag (and the matching
-            # private Cache-Control); HEAD and live/sensitive routes do not.
+            # on a reference endpoint gets a strong ETag. HEAD and
+            # live/sensitive routes do not. The matching ``Cache-Control`` is
+            # stamped by ``_send_json`` from the shared path/status table.
             reference = (
                 self.command == "GET" and (path.rstrip("/") or "/") in ETAG_ENDPOINTS
             )
             self._send_json(
                 handler(body, params, query),
                 _SUCCESS_STATUS.get(handler, 200),
-                cache_control=_CACHE_CONTROL_PRIVATE if reference else None,
                 enable_etag=reference,
             )
             return

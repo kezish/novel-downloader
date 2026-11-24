@@ -49,6 +49,7 @@ from starlette.types import Message, Receive, Scope, Send
 from novel_downloader.apps.api import create_app
 from novel_downloader.apps.api import routes as api_routes
 from novel_downloader.apps.api.middleware import (
+    CACHE_CONTROL_NO_STORE,
     CACHE_CONTROL_PRIVATE,
     REQUEST_ID_HEADER,
     SECURITY_HEADERS,
@@ -720,6 +721,12 @@ def test_embedded_weak_and_list_matching(embedded: SimpleNamespace) -> None:
 
 
 def test_embedded_live_endpoint_has_no_etag(embedded: SimpleNamespace) -> None:
+    """Live state gets no validator, but the REST ``no-store`` directive.
+
+    The cache policy is now shared with REST (``apps.common.cache_policy``), so
+    the engine marks task state uncacheable even though it never takes part in
+    conditional requests.
+    """
     status, headers, body = _request(
         embedded.port, "/api/v1/tasks", {"If-None-Match": "*"}
     )
@@ -727,7 +734,7 @@ def test_embedded_live_endpoint_has_no_etag(embedded: SimpleNamespace) -> None:
     assert status == 200
     assert body
     assert "etag" not in headers
-    assert "cache-control" not in headers
+    assert headers["cache-control"] == CACHE_CONTROL_NO_STORE
 
 
 def test_embedded_history_query_changes_validator(
