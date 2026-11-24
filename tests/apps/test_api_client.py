@@ -606,10 +606,17 @@ class _SyncASGITransport(httpx.BaseTransport):
             return response
 
         response = asyncio.run(_call())
+        # ``response.content`` is already decoded by the underlying client, so
+        # a ``Content-Encoding`` header inherited from the wire would make the
+        # re-wrapped response decode the plain bytes a second time. The length
+        # is restated for the decoded body (the server may have compressed it).
+        headers = response.headers.copy()
+        headers.pop("content-encoding", None)
+        headers["content-length"] = str(len(response.content))
         # Re-wrap with an in-memory stream so the sync client can read it.
         return httpx.Response(
             response.status_code,
-            headers=response.headers,
+            headers=headers,
             content=response.content,
             extensions=response.extensions,
         )

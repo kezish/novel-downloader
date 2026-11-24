@@ -27,7 +27,8 @@ from novel_downloader.apps.desktop.web_assets import APP_HTML
 
 #: Sinks that write markup. Counts are frozen: a new sink needs review.
 SINK_COUNTS = {
-    "innerHTML": 34,
+    # +1: the recent-search chip row renders buttons from esc()-ed terms.
+    "innerHTML": 35,
     "insertAdjacentHTML": 1,
     "outerHTML": 1,
 }

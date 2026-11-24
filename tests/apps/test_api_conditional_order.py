@@ -11,8 +11,12 @@ rate limiter, and the HTTP method restriction.
 Documented order (outermost first, i.e. ``add_middleware`` in reverse)::
 
     RequestId -> Logging -> SecurityHeaders -> CORS -> CacheControl
-    -> ConditionalGet -> RateLimit -> DownloadsAuth -> BodySizeLimit
-    -> OriginCheck -> router (token dependency)
+    -> Compression -> ConditionalGet -> RateLimit -> DownloadsAuth
+    -> BodySizeLimit -> OriginCheck -> router (token dependency)
+
+``Compression`` wraps ``ConditionalGet`` so the validator is computed from
+the uncompressed body and the gzip decision happens afterwards, which keeps
+the same ``ETag`` valid across encodings.
 
 The security-relevant consequence is that every layer that can answer a
 request *rejecting* it sits inside :class:`ConditionalGetMiddleware`, and
@@ -48,6 +52,7 @@ from novel_downloader.apps.api.middleware import (
     REQUEST_ID_HEADER,
     BodySizeLimitMiddleware,
     CacheControlMiddleware,
+    CompressionMiddleware,
     ConditionalGetMiddleware,
     DownloadsAuthMiddleware,
     OriginCheckMiddleware,
@@ -162,6 +167,7 @@ def test_middleware_order_matches_the_documented_matrix(make_app: Any) -> None:
         SecurityHeadersMiddleware,
         CORSMiddleware,
         CacheControlMiddleware,
+        CompressionMiddleware,
         ConditionalGetMiddleware,
         RateLimitMiddleware,
         DownloadsAuthMiddleware,
@@ -174,6 +180,7 @@ def test_middleware_order_matches_the_documented_matrix(make_app: Any) -> None:
         RequestLoggingMiddleware,
         SecurityHeadersMiddleware,
         CacheControlMiddleware,
+        CompressionMiddleware,
         ConditionalGetMiddleware,
         RateLimitMiddleware,
         DownloadsAuthMiddleware,
