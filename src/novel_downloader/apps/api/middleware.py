@@ -52,6 +52,14 @@ Request-hardening helpers shared by the REST API application.
   ``304 Not Modified`` and no body, so a polling client transfers headers
   instead of a payload. Only explicitly listed idempotent endpoints take
   part; live and credential-bearing paths never receive a validator.
+* :class:`CompressionMiddleware` gzips JSON ``/api/v1`` responses of at least
+  1 KiB when the client advertised gzip, and stamps ``Vary: Accept-Encoding``
+  on every governed response (including the ``304`` it passes through). It
+  sits *outside* :class:`ConditionalGetMiddleware`, so the validator is
+  computed from the uncompressed representation and stays identical whether
+  the client asked for gzip or identity. SSE streams, ``/downloads`` files,
+  body-less statuses and responses that already carry a ``Content-Encoding``
+  are never compressed.
 * :class:`SecurityHeadersMiddleware` adds ``X-Content-Type-Options: nosniff``
   and ``Referrer-Policy: no-referrer`` to API and download responses, and a
   sandboxing ``Content-Security-Policy`` to ``/downloads`` so an exported
@@ -72,6 +80,7 @@ import math
 import re
 import time
 import uuid
+import zlib
 from collections import OrderedDict, deque
 from collections.abc import Iterable
 from contextvars import ContextVar
@@ -85,6 +94,13 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_403_FORBIDDEN
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from novel_downloader.apps.common.compression import (
+    COMPRESSION_LEVEL,
+    COMPRESSION_MIN_BYTES,
+    accepts_gzip,
+    is_compressible_status,
+    is_json_media_type,
+)
 from novel_downloader.apps.common.conditional_get import (
     ETAG_ENDPOINTS,
     ETAG_MAX_BODY_BYTES,
@@ -198,6 +214,17 @@ SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
 #: directive blocks script execution while still letting the browser display
 #: plain text and images.
 DOWNLOADS_CSP = "sandbox; default-src 'none'"
+
+# ---------------------------------------------------------------------------
+# Response compression
+# ---------------------------------------------------------------------------
+
+#: Path prefixes whose JSON responses may be gzipped. Only the API tree is
+#: governed: the ``/downloads`` files are already exported artifacts (often
+#: already compressed) and are streamed from disk, so re-encoding them would
+#: only add latency and memory use. ``/docs`` and ``/openapi.json`` are
+#: deliberately outside the policy as well.
+COMPRESSION_PREFIXES: tuple[str, ...] = ("/api/v1",)
 
 # ---------------------------------------------------------------------------
 # Request correlation
@@ -1157,6 +1184,234 @@ class ConditionalGetMiddleware:
                 )
 
 
+def _append_vary(headers: MutableHeaders, token: str) -> None:
+    """
+    Add ``token`` to the ``Vary`` header without duplicating an existing one.
+
+    ``Vary`` is a comma-separated list; ``*`` already means "varies on
+    everything", so it is left untouched. Matching is case-insensitive, as
+    field names and header values in ``Vary`` are.
+    """
+    existing = headers.get("vary")
+    if not existing:
+        headers["vary"] = token
+        return
+    present = {part.strip().lower() for part in existing.split(",")}
+    if "*" in present or token.lower() in present:
+        return
+    headers["vary"] = f"{existing}, {token}"
+
+
+class CompressionMiddleware:
+    """
+    Gzip eligible ``/api/v1`` JSON responses and advertise the negotiation.
+
+    A response is compressed only when all of the following hold: the client's
+    ``Accept-Encoding`` admits gzip (:func:`accepts_gzip`, honouring ``q``
+    weights and ``*``), the response is a ``2xx`` with a body, its
+    ``Content-Type`` is JSON, it does not already carry a ``Content-Encoding``,
+    and the body is at least :data:`COMPRESSION_MIN_BYTES` (1 KiB). If the body
+    turns out smaller than that, it is released unchanged with its original
+    ``Content-Length``. Once compression starts, ``Content-Length`` is removed
+    (the encoded length is not known until the stream ends) and the body is
+    re-encoded chunk by chunk.
+
+    Because the remaining body is streamed through ``zlib``, SSE streams and
+    exported files are excluded by media type/path rather than by buffering:
+    they pass through untouched and unbuffered. ``304 Not Modified`` (and
+    ``204``/``205``/``206``) are also passed through — there is no
+    representation to compress — but still receive ``Vary``.
+
+    ``Vary: Accept-Encoding`` is set on every governed response, identity ones
+    included, so a shared cache never reuses a gzip body for a client that
+    did not ask for it. The header is added *before* the compression decision,
+    which is what makes the ``304`` produced by
+    :class:`ConditionalGetMiddleware` carry it too.
+
+    Ordering: this layer must sit *outside* :class:`ConditionalGetMiddleware`,
+    which buffers the uncompressed body and derives the strong ``ETag`` from
+    those exact bytes. Compressing afterwards leaves the validator unchanged
+    across encodings, so an ``If-None-Match`` from either a gzip or an identity
+    round trip still yields ``304``. Installing it inside would hash the gzip
+    bytes and break that invariant. The cache, security-header, CORS and
+    request-id layers are further out and stamp the compressed response
+    exactly as they would an identity one.
+
+    :param app: The wrapped ASGI application.
+    :param min_bytes: Smallest body worth compressing (default 1 KiB).
+    :param level: zlib compression level (default 6).
+    :param prefixes: Path prefixes governed by the policy.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        min_bytes: int = COMPRESSION_MIN_BYTES,
+        level: int = COMPRESSION_LEVEL,
+        prefixes: Iterable[str] = COMPRESSION_PREFIXES,
+    ) -> None:
+        self.app = app
+        self.min_bytes = max(int(min_bytes), 0)
+        self.level = int(level)
+        self.prefixes = tuple("/" + prefix.strip("/") for prefix in prefixes)
+
+    def _governs(self, path: str) -> bool:
+        """Whether the policy covers this path (boundary-aware prefix match)."""
+        cleaned = path.rstrip("/") or "/"
+        return any(
+            cleaned == prefix or cleaned.startswith(prefix + "/")
+            for prefix in self.prefixes
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if not self._governs(routed_path(scope)):
+            await self.app(scope, receive, send)
+            return
+
+        # A HEAD reply carries no body to transfer; its head keeps the identity
+        # representation's ``Content-Length`` (as HEAD should mirror GET).
+        accepted = str(scope.get("method", "")).upper() != "HEAD" and accepts_gzip(
+            Headers(scope=scope).get("accept-encoding")
+        )
+
+        start: Message | None = None
+        buffered = bytearray()
+        compressor: Any = None
+        #: ``idle`` (no head yet), ``pass`` (streaming untouched), ``hold``
+        #: (head held back while the body is buffered) or ``gzip`` (streaming
+        #: the re-encoded body).
+        mode = "idle"
+        finished = False
+
+        async def emit_body(data: bytes, more: bool) -> None:
+            await send({"type": "http.response.body", "body": data, "more_body": more})
+
+        async def begin_gzip() -> None:
+            """Turn the held head into a gzip reply and send it."""
+            nonlocal mode, compressor
+            assert start is not None
+            headers = MutableHeaders(scope=start)
+            headers["Content-Encoding"] = "gzip"
+            if "content-length" in headers:
+                del headers["content-length"]
+            compressor = zlib.compressobj(
+                self.level, zlib.DEFLATED, 16 + zlib.MAX_WBITS
+            )
+            mode = "gzip"
+            await send(start)
+
+        async def handle_body(body: bytes, more: bool) -> None:
+            nonlocal mode, finished
+            if mode == "pass":
+                await emit_body(body, more)
+                return
+            if mode == "gzip":
+                assert compressor is not None
+                data = compressor.compress(body) if body else b""
+                if not more:
+                    data += compressor.flush()
+                    finished = True
+                await emit_body(data, more)
+                return
+            if mode == "hold":
+                buffered.extend(body)
+                if more and len(buffered) < self.min_bytes:
+                    return
+                if not more and len(buffered) < self.min_bytes:
+                    # Below the threshold: release the head and body untouched.
+                    mode = "pass"
+                    assert start is not None
+                    await send(start)
+                    await emit_body(bytes(buffered), False)
+                    finished = True
+                    return
+                await begin_gzip()
+                assert compressor is not None
+                data = compressor.compress(bytes(buffered))
+                buffered.clear()
+                if not more:
+                    data += compressor.flush()
+                    finished = True
+                await emit_body(data, more)
+                return
+            # ``idle``: a body without a response head violates ASGI; never
+            # hold bytes that have no head to pair with.
+            mode = "pass"
+            await emit_body(body, more)
+
+        async def send_with_compression(message: Message) -> None:
+            nonlocal mode, start
+            message_type = message["type"]
+
+            if message_type == "http.response.start":
+                message.setdefault("headers", [])
+                headers = MutableHeaders(scope=message)
+                # Added before the decision so every governed response — the
+                # 304 passthrough included — advertises the negotiation.
+                _append_vary(headers, "Accept-Encoding")
+                status = int(message.get("status", 0))
+                compressible = (
+                    accepted
+                    and is_compressible_status(status)
+                    and "content-encoding" not in headers
+                    and is_json_media_type(headers.get("content-type"))
+                )
+                if compressible:
+                    start = message
+                    mode = "hold"
+                    return
+                mode = "pass"
+                await send(message)
+                return
+
+            if message_type == "http.response.body":
+                await handle_body(
+                    message.get("body", b""), bool(message.get("more_body", False))
+                )
+                return
+
+            # Trailers (or an extended message): release the held head
+            # untouched and let the message through.
+            if mode == "hold" and start is not None:
+                mode = "pass"
+                await send(start)
+                if buffered:
+                    await emit_body(bytes(buffered), True)
+                    buffered.clear()
+            await send(message)
+
+        completed = False
+        try:
+            await self.app(scope, receive, send_with_compression)
+            completed = True
+        finally:
+            # Never touch the response when the application raised: the error
+            # has to propagate to the outer error layer untouched.
+            if completed and start is not None:
+                if mode == "hold":
+                    # The app ended without a final body message: serve what
+                    # was buffered, compressed when it crossed the threshold.
+                    if len(buffered) >= self.min_bytes:
+                        await begin_gzip()
+                        assert compressor is not None
+                        data = compressor.compress(bytes(buffered)) + compressor.flush()
+                        buffered.clear()
+                        await emit_body(data, False)
+                    else:
+                        await send(start)
+                        await emit_body(bytes(buffered), False)
+                elif mode == "gzip" and not finished:
+                    # The stream ended without its final chunk: close the gzip
+                    # member so the client does not wait for a trailer.
+                    assert compressor is not None
+                    await emit_body(compressor.flush(), False)
+
+
 class SecurityHeadersMiddleware:
     """
     Add defence-in-depth response headers to API and download responses.
@@ -1387,6 +1642,7 @@ __all__ = [
     "CACHE_CONTROL_PUBLIC",
     "CACHE_CONTROL_RULES",
     "CACHE_POLICY_PREFIXES",
+    "COMPRESSION_PREFIXES",
     "DEFAULT_MAX_BODY_BYTES",
     "DEFAULT_RATE_LIMIT",
     "DEFAULT_RATE_LIMIT_MAX_KEYS",
@@ -1404,6 +1660,7 @@ __all__ = [
     "SLOW_REQUEST_SECONDS",
     "BodySizeLimitMiddleware",
     "CacheControlMiddleware",
+    "CompressionMiddleware",
     "ConditionalGetMiddleware",
     "DownloadsAuthMiddleware",
     "OriginCheckMiddleware",

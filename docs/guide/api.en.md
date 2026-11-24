@@ -1463,6 +1463,49 @@ curl -sD - -o /dev/null \
 Live or credential-bearing endpoints (`/tasks*`, `/login*`, `/music/jobs*`,
 `/watchlist*`) do **not** take part and never send an `ETag`.
 
+### Response compression (gzip) {#response-compression}
+
+A `/api/v1` JSON response is gzipped when all of the following hold:
+
+- the request's `Accept-Encoding` admits gzip: `gzip`, `*` or a weighted
+  `gzip;q=0.5` work, while `gzip;q=0` refuses it (`br`/`zstd` are not
+  implemented, so a client asking only for those gets identity);
+- the status is `2xx` and carries a body (`204`/`205`/`206`/`304` excepted);
+- the `Content-Type` is JSON (`application/json` or `application/*+json`);
+- the body is at least 1 KiB.
+
+A compressed response carries `Content-Encoding: gzip` and **drops**
+`Content-Length` (the encoded length is not known until the stream ends, so
+the server switches to chunked transfer); an identity response keeps an exact
+`Content-Length`. JSON below 1 KiB is not compressed: the gzip header/trailer
+plus the extra response header can cost more than they save.
+
+Every `/api/v1` response — `304`, SSE and errors included — carries
+`Vary: Accept-Encoding`, so a shared cache never reuses one client's gzip
+representation for a client that cannot decode it. The following are
+**never** compressed:
+
+- SSE (`text/event-stream`): compression would require buffering and break
+  real-time delivery;
+- `/downloads/*` files: exports are often already compressed and are streamed
+  from disk;
+- `304` and the other body-less statuses.
+
+```bash
+# Negotiate gzip (--compressed decompresses and prints the body)
+curl -sD - --compressed http://127.0.0.1:8080/api/v1/sites
+
+# Inspect the raw gzip bytes (no automatic decoding)
+curl -s -H 'Accept-Encoding: gzip' -D - -o /tmp/sites.gz \
+  http://127.0.0.1:8080/api/v1/sites
+```
+
+**Interaction with conditional requests**: the `ETag` is always computed
+from the **uncompressed** representation, so the same resource has the same
+`ETag` under gzip and identity. A validator obtained in either mode still
+yields `304`; compression happens after the conditional decision and never
+changes the validator.
+
 ### CORS
 
 Off by default: no `Access-Control-*` header is sent, and a browser request
@@ -1496,7 +1539,12 @@ removed.
     strong `ETag`, `Cache-Control: private, max-age=60`, and answer a
     matching `If-None-Match` with `304`. The rest of the REST cache policy
     (live-data `no-store`, `/downloads` `public`) is still not implemented
-    (native clients do not sit behind an HTTP cache). Pointing a browser at
+    (native clients do not sit behind an HTTP cache). JSON responses are
+    gzipped under the same rules as REST: same 1 KiB threshold,
+    `Vary: Accept-Encoding` on every response (`304` included), and an `ETag`
+    computed from the uncompressed representation. `/downloads` files are
+    never compressed. The embedded engine exposes no SSE endpoint, so the
+    SSE exclusion does not arise there. Pointing a browser at
     the embedded port would require adding CORS and that policy.
 
 ## Error codes

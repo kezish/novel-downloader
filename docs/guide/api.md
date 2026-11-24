@@ -1279,6 +1279,44 @@ curl -sD - -o /dev/null \
 `/tasks*`、`/login*`、`/music/jobs*`、`/watchlist*` 等实时或含凭据的端点
 **不启用**条件请求，也不发送 `ETag`。
 
+### 响应压缩（gzip） {#response-compression}
+
+`/api/v1` 的 JSON 响应在同时满足以下条件时用 gzip 压缩：
+
+- 请求的 `Accept-Encoding` 允许 gzip：`gzip`、`*` 或带权重的
+  `gzip;q=0.5` 都可以，`gzip;q=0` 明确拒绝（`br`/`zstd` 未实现，
+  只请求它们的客户端拿到未压缩响应）；
+- 状态为 `2xx` 且带响应体（`204`/`205`/`206`/`304` 除外）；
+- `Content-Type` 是 JSON（`application/json` 或 `application/*+json`）；
+- 响应体至少 1 KiB。
+
+压缩后的响应带 `Content-Encoding: gzip`，并**移除** `Content-Length`
+（编码后的长度要到流结束才知道，服务器改用分块传输）；未压缩的响应保留
+精确的 `Content-Length`。小于 1 KiB 的 JSON 不压缩：gzip 头尾与额外响应头
+的开销可能超过收益。
+
+所有 `/api/v1` 响应（包括 `304`、SSE 与各类错误）都带
+`Vary: Accept-Encoding`，避免共享缓存把某个客户端的 gzip 表示复用给不
+支持它的客户端。以下内容**从不压缩**：
+
+- SSE（`text/event-stream`）：压缩需要缓冲，会破坏实时性；
+- `/downloads/*` 文件：导出产物往往已压缩，且从磁盘流式发送；
+- `304` 与其他无响应体的状态。
+
+```bash
+# 协商 gzip（--compressed 会解压并显示正文）
+curl -sD - --compressed http://127.0.0.1:8080/api/v1/sites
+
+# 查看原始 gzip 字节（不自动解压）
+curl -s -H 'Accept-Encoding: gzip' -D - -o /tmp/sites.gz \
+  http://127.0.0.1:8080/api/v1/sites
+```
+
+**与条件请求的关系**：`ETag` 始终基于**未压缩**的表示计算，因此同一资源
+在 gzip 与 identity 下 `ETag` 相同。任一编码下拿到的 `ETag` 放进
+`If-None-Match`，两种编码都会得到 `304`；压缩发生在条件判断之后，不会
+改变校验器。
+
 ### CORS
 
 默认**关闭**：不发送任何 `Access-Control-*` 头，且携带非回环 `Origin` 的
@@ -1307,7 +1345,10 @@ curl 不发 `Origin`，不受影响。
     （`/sites`、`/history`、`/music/platforms`）与 REST 一样带强 `ETag` 与
     `Cache-Control: private, max-age=60`，匹配的 `If-None-Match` 同样返回
     `304`；其余 REST 缓存策略（实时数据的 `no-store`、`/downloads` 的
-    `public`）仍未实现（原生客户端不经过 HTTP 缓存）。若将来让浏览器访问
+    `public`）仍未实现（原生客户端不经过 HTTP 缓存）。JSON 响应同样支持
+    gzip：阈值、`Vary: Accept-Encoding`（`304` 也带）和「`ETag` 基于未压缩
+    表示」的规则与 REST 一致，`/downloads` 文件不压缩。内嵌引擎没有 SSE
+    端点，因此不存在 SSE 压缩问题。若将来让浏览器访问
     内嵌端口，需要先补上 CORS 与这部分策略。
 
 ## 错误码

@@ -64,6 +64,13 @@ Additional hardening
   (:class:`novel_downloader.apps.api.middleware.ConditionalGetMiddleware`),
   so a polling client revalidates without transferring the payload. Live and
   credential-bearing endpoints never receive a validator.
+* ``/api/v1`` JSON responses of at least 1 KiB are gzipped when the client
+  sends ``Accept-Encoding: gzip``, and every governed response carries
+  ``Vary: Accept-Encoding`` (the ``304`` included). The validator is computed
+  from the uncompressed representation, so the same ``ETag`` works in both
+  encoding modes; SSE streams, ``/downloads`` files and body-less statuses
+  stay uncompressed
+  (:class:`novel_downloader.apps.api.middleware.CompressionMiddleware`).
 * API and download responses carry ``X-Content-Type-Options: nosniff`` and
   ``Referrer-Policy: no-referrer``; ``/downloads`` additionally gets a
   sandboxing ``Content-Security-Policy`` so a malicious exported HTML file
@@ -114,6 +121,7 @@ from .middleware import (
     REQUEST_ID_HEADER,
     BodySizeLimitMiddleware,
     CacheControlMiddleware,
+    CompressionMiddleware,
     ConditionalGetMiddleware,
     DownloadsAuthMiddleware,
     OriginCheckMiddleware,
@@ -972,6 +980,13 @@ def create_app(
     # rule instead of ``no-store``; the security-header and request-id layers
     # are further out and stamp it exactly as they would a 200.
     application.add_middleware(ConditionalGetMiddleware)
+
+    # Compression wraps the conditional-GET layer: that layer hashes the
+    # *uncompressed* body, so the validator it attaches is identical whether
+    # the client negotiates gzip or identity. Compressing outside it means the
+    # gzip decision is taken on the exact bytes that were hashed, and a 304
+    # still flows through here to receive ``Vary: Accept-Encoding``.
+    application.add_middleware(CompressionMiddleware)
 
     # Cache policy sits *outside* the auth and body-limit layers so their
     # direct 401/413 responses carry the same Cache-Control as every other

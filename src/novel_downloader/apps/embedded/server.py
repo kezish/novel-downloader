@@ -51,6 +51,13 @@ Contract parity with the REST API
   ``Cache-Control: private, max-age=60``; the rest of the REST cache policy
   is still not implemented here (native clients do not sit behind an HTTP
   cache). Live and credential-bearing routes never receive a validator.
+* JSON responses of at least 1 KiB are gzipped when the request sends
+  ``Accept-Encoding: gzip`` (``q=0`` refuses it), mirroring the REST
+  transport. ``Vary: Accept-Encoding`` is sent on every JSON response,
+  ``304`` included. The ``ETag`` is still derived from the uncompressed
+  body, so it is identical in both encoding modes. ``/downloads`` files are
+  never re-encoded, and body-less statuses (``304``, ``204``, ``205``,
+  ``206``) are never compressed.
 
 Authentication
 --------------
@@ -104,6 +111,12 @@ from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse, urlsplit
 
+from novel_downloader.apps.common.compression import (
+    COMPRESSION_MIN_BYTES,
+    accepts_gzip,
+    gzip_bytes,
+    is_compressible_status,
+)
 from novel_downloader.apps.common.conditional_get import (
     ETAG_ENDPOINTS,
     ETAG_MAX_BODY_BYTES,
@@ -3244,16 +3257,35 @@ class _Handler(BaseHTTPRequestHandler):
         ):
             # A 304 has no message body and therefore no Content-Type or
             # Content-Length; ETag, Cache-Control, X-Request-ID and the
-            # security headers (end_headers) are still sent.
+            # security headers (end_headers) are still sent. ``Vary`` is
+            # still required: the same resource would be gzipped or not
+            # depending on the request's ``Accept-Encoding``.
             self.send_response(304)
             self.send_header("ETag", etag)
+            self.send_header("Vary", "Accept-Encoding")
             if cache_control:
                 self.send_header("Cache-Control", cache_control)
             self.end_headers()
             return
+        # The ETag above is derived from ``data`` (the identity
+        # representation), so compressing here cannot change it: a validator
+        # obtained from a gzip or an identity response is interchangeable.
+        compressed = (
+            is_compressible_status(status)
+            and len(data) >= COMPRESSION_MIN_BYTES
+            and accepts_gzip(self.headers.get("Accept-Encoding"))
+            and not (
+                extra_headers
+                and any(name.lower() == "content-encoding" for name in extra_headers)
+            )
+        )
+        body = gzip_bytes(data) if compressed else data
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Vary", "Accept-Encoding")
+        if compressed:
+            self.send_header("Content-Encoding", "gzip")
         for name, value in (extra_headers or {}).items():
             self.send_header(name, value)
         if cache_control:
@@ -3262,7 +3294,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("ETag", etag)
         self.end_headers()
         if self.command != "HEAD":
-            self.wfile.write(data)
+            self.wfile.write(body)
 
     def _send_api_error(self, error: _ApiError) -> None:
         payload: dict[str, Any] = {"detail": error.detail}
