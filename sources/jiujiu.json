@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "id": "sk_jiujiu",
+  "backend": "direct",
+  "rule": {
+    "site_name": "久久小说 (SourceKit)",
+    "base_url": "https://www.ijjxsxzw.com",
+    "hosts": [
+      "www.ijjxsxzw.com"
+    ],
+    "search": {
+      "url": "{base_url}/e/search/index.php",
+      "method": "POST",
+      "data": {
+        "show": "title,writer",
+        "tbname": "download",
+        "tempid": "2",
+        "orderby": "newstime",
+        "myorder": "0",
+        "keyboard": "{raw_keyword}"
+      },
+      "item": ".listbg",
+      "book_id_regex": "/txt/([0-9]+)\\.html",
+      "fields": {
+        "title": {
+          "selector": ".title a",
+          "attr": "text"
+        },
+        "url": {
+          "selector": ".title a",
+          "attr": "href"
+        },
+        "author": {
+          "selector": "a[href^='/zuozhe/']",
+          "attr": "text"
+        }
+      }
+    }
+  },
+  "direct": {
+    "download_page": "/txt/dl-{book_id}.html",
+    "selector": "a.download_1",
+    "content_kind": "txt"
+  }
+}

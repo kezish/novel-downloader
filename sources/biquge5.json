@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "sk_biquge5",
+  "backend": "native",
+  "rule": {
+    "site_name": "笔趣阁5 (SourceKit)",
+    "base_url": "https://www.biquge5.com",
+    "hosts": [
+      "www.biquge5.com"
+    ]
+  },
+  "extends": "biquge-paged@1"
+}

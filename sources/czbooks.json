@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "id": "sk_czbooks",
+  "backend": "plugin",
+  "rule": {
+    "site_name": "小說狂人 (SourceKit)",
+    "base_url": "https://czbooks.net",
+    "hosts": [
+      "czbooks.net"
+    ],
+    "search": {
+      "url": "{base_url}/s/{keyword}",
+      "item": "ul.novel-list li.novel-item-wrapper",
+      "book_id_regex": "/n/([^/?#]+)",
+      "fields": {
+        "title": {
+          "selector": ".novel-item-title",
+          "attr": "text"
+        },
+        "url": {
+          "selector": ".novel-item-cover-wrapper a",
+          "attr": "href"
+        },
+        "author": {
+          "selector": ".novel-item-author a",
+          "attr": "text"
+        },
+        "latest": {
+          "selector": ".novel-item-newest-chapter a",
+          "attr": "text"
+        },
+        "update": {
+          "selector": ".novel-item-date",
+          "attr": "text"
+        }
+      }
+    },
+    "book": {
+      "url": "{base_url}/n/{book_id}",
+      "fields": {
+        "book_name": {
+          "selector": ".info h1.title",
+          "attr": "text",
+          "fallback": [
+            ".info span.title"
+          ]
+        },
+        "author": {
+          "selector": ".info .author a",
+          "attr": "text"
+        },
+        "summary": {
+          "selector": ".description",
+          "attr": "inner_text"
+        },
+        "cover_url": {
+          "selector": ".thumbnail img",
+          "attr": "src"
+        }
+      },
+      "chapters": {
+        "item": "#chapter-list a[href]",
+        "id_regex": "/n/[^/]+/([^/?#]+)"
+      }
+    },
+    "chapter": {
+      "url": "{base_url}/n/{book_id}/{chapter_id}",
+      "title": {
+        "selector": ".name",
+        "attr": "text"
+      },
+      "content": {
+        "selector": "div.content",
+        "attr": "inner_text"
+      }
+    },
+    "resolve": {
+      "book": "^/n/([^/?#]+)$",
+      "chapter": "^/n/([^/]+)/([^/?#]+)$"
+    }
+  },
+  "extension": "czbooks"
+}
