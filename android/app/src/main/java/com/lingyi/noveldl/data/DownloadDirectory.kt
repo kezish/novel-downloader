@@ -193,6 +193,11 @@ interface SafDocument {
  * provider itself (e.g. `SecurityException` from a revoked grant) propagate so
  * the caller can report the underlying failure.
  *
+ * A looked-up subdirectory is only reused while it still [SafDocument.exists]:
+ * a provider may keep handing out a `DocumentFile` for a folder the user
+ * deleted behind the app's back, and creating a file inside it would fail with
+ * a provider error instead of rebuilding the folder.
+ *
  * The returned document's [SafDocument.name] is what the provider actually
  * created and may differ from the requested name.
  */
@@ -207,7 +212,7 @@ fun prepareDownloadDestination(
         throw DownloadDirectoryUnavailableException(unavailableMessage)
     }
     val directory = tree.findDirectory(DOWNLOAD_SUBDIRECTORY)
-        ?.takeIf { it.isDirectory }
+        ?.takeIf { it.isDirectory && it.exists }
         ?: tree.createDirectory(DOWNLOAD_SUBDIRECTORY)
         ?: throw IllegalStateException(createFailedMessage)
     val fileName = uniqueChildName(desiredName, directory.listChildNames())

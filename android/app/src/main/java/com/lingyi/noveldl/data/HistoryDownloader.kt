@@ -210,15 +210,18 @@ object HistoryDownloader {
                     // function so it can be unit tested with byte streams.
                     val coroutineContext = currentCoroutineContext()
                     body.byteStream().use { input ->
-                        output.use {
-                            streamToDocument(
-                                input = input,
-                                output = it,
-                                totalBytes = body.contentLength().takeIf { length -> length > 0 },
-                                onProgress = onProgress,
-                                checkActive = { coroutineContext.ensureActive() },
-                            )
-                        }
+                        // The output is closed (and its close classified as a
+                        // write) by the helper, so a provider that fails while
+                        // flushing at close() is still reported as a storage
+                        // failure instead of being relabelled as a network one
+                        // by the IOException catch below.
+                        streamToDocumentAndClose(
+                            input = input,
+                            output = output,
+                            totalBytes = body.contentLength().takeIf { length -> length > 0 },
+                            onProgress = onProgress,
+                            checkActive = { coroutineContext.ensureActive() },
+                        )
                     }
                 }
                 savedName
@@ -421,8 +424,9 @@ internal class DownloadProgressThrottle(
  *
  * Failures are classified by phase: a read error is [DownloadFailureKind.Network],
  * while open/write/flush errors go through [classifyWriteFailure]. [checkActive]
- * runs before every chunk; a cancelled coroutine's `CancellationException`
- * propagates unchanged so the caller can delete the partial document.
+ * runs before every chunk and once more before the final sample; a cancelled
+ * coroutine's `CancellationException` propagates unchanged so the caller can
+ * delete the partial document, and no 100 % sample is emitted for it.
  *
  * Returns the final sample, whose total is [totalBytes] when known and the
  * written size otherwise (so a completed unknown-length download reads 100 %).
@@ -472,9 +476,63 @@ internal fun streamToDocument(
     } catch (e: Exception) {
         throw DownloadFailureException(classifyWriteFailure(e), e.message, e)
     }
+    // A cancellation that lands while the last bytes/flush were in flight must
+    // not surface as "100 %, saved": the caller is about to delete the partial.
+    checkActive()
     val finalSample = DownloadProgress(written, totalBytes ?: written)
     onProgress(finalSample)
     return finalSample
+}
+
+/**
+ * [streamToDocument] plus an owned close of [output].
+ *
+ * The close is where a SAF provider often notices the grant was revoked (or
+ * the volume ran out): buffered bytes are flushed, so a `SecurityException`,
+ * `IOException("write failed: ENOSPC …")` or a provider crash can be thrown by
+ * `close()` after a successful loop. Those are write failures, not network
+ * ones, so they are classified with [classifyWriteFailure]; swallowing them
+ * would lose the last chunk of the user's file silently.
+ *
+ * A close failure never masks the failure that already interrupted the
+ * transfer (that one names the real cause and carries its kind).
+ */
+internal fun streamToDocumentAndClose(
+    input: InputStream,
+    output: OutputStream,
+    totalBytes: Long?,
+    onProgress: (DownloadProgress) -> Unit,
+    checkActive: () -> Unit = {},
+    throttle: DownloadProgressThrottle = DownloadProgressThrottle(),
+    nowNanos: () -> Long = System::nanoTime,
+): DownloadProgress {
+    var failure: Throwable? = null
+    try {
+        return streamToDocument(
+            input = input,
+            output = output,
+            totalBytes = totalBytes,
+            onProgress = onProgress,
+            checkActive = checkActive,
+            throttle = throttle,
+            nowNanos = nowNanos,
+        )
+    } catch (t: Throwable) {
+        failure = t
+        throw t
+    } finally {
+        try {
+            output.close()
+        } catch (closeError: Exception) {
+            if (failure == null) {
+                throw DownloadFailureException(
+                    classifyWriteFailure(closeError),
+                    closeError.message,
+                    closeError,
+                )
+            }
+        }
+    }
 }
 
 /**
