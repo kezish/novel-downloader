@@ -80,6 +80,19 @@ def _copy_file_atomic(source: Path, target: Path) -> None:
         raise
 
 
+def _discard_temp(temp: Path) -> None:
+    """Delete ``temp``, including when it inherited a read-only target's mode.
+
+    The atomic writers copy the destination's permission bits onto their
+    temporary file before the rename, so a failed replace over a read-only
+    file would otherwise leave a ``.tmp`` Windows refuses to delete.
+    """
+    with suppress(OSError):
+        temp.chmod(stat.S_IWRITE | stat.S_IREAD)
+    with suppress(OSError):
+        temp.unlink(missing_ok=True)
+
+
 def _write_bytes_atomic(target: Path, data: bytes) -> None:
     """Write ``data`` to ``target`` through a same-directory temporary file.
 
@@ -107,8 +120,7 @@ def _write_bytes_atomic(target: Path, data: bytes) -> None:
             os.chmod(temp, mode)
         os.replace(temp, target)
     except BaseException:
-        with suppress(OSError):
-            temp.unlink(missing_ok=True)
+        _discard_temp(temp)
         raise
 
 

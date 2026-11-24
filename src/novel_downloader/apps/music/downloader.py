@@ -1720,6 +1720,10 @@ def _write_playlist_text(playlist_path, text):
     try:
         with os.fdopen(fd, "w", encoding=encoding, newline="\n") as handle:
             handle.write(text)
+            # Same durability rule as the lyric writer: without this a crash
+            # right after ``os.replace`` could publish an empty playlist.
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temp_path, playlist_path)
     except BaseException:
         # 失败时绝不留下半个歌单或临时文件。

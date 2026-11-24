@@ -279,6 +279,19 @@ def get_config_value(keys: list[str], default: Any) -> Any:
     return default
 
 
+def _discard_temp(temp: Path) -> None:
+    """Delete ``temp``, including when it inherited a read-only target's mode.
+
+    ``_write_bytes_atomic`` copies the existing file's permission bits onto its
+    temporary file before the rename, so a failed replace over a read-only
+    target would otherwise leave a ``.tmp`` that Windows refuses to delete.
+    """
+    with contextlib.suppress(OSError):
+        temp.chmod(stat.S_IWRITE | stat.S_IREAD)
+    with contextlib.suppress(OSError):
+        temp.unlink(missing_ok=True)
+
+
 def _write_bytes_atomic(target: Path, data: bytes) -> None:
     """Replace ``target`` atomically, keeping the original on any failure.
 
@@ -306,8 +319,7 @@ def _write_bytes_atomic(target: Path, data: bytes) -> None:
             os.chmod(temp, mode)
         os.replace(temp, target)
     except BaseException:
-        with contextlib.suppress(OSError):
-            temp.unlink(missing_ok=True)
+        _discard_temp(temp)
         raise
 
 

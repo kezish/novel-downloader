@@ -40,6 +40,7 @@ import re
 import shutil
 import stat
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -1184,8 +1185,11 @@ def download_asset(
             # already deleted it above.
             time.sleep(min(5.0, 1.5 * attempt))
     assert last_error is not None
+    # Name the file and the folder it was meant for: the raw OS error usually
+    # only carries errno text, which is useless in the update bar for "disk
+    # full" or a sharing violation on the finished file.
     raise OSError(
-        f"update download failed after {tries} attempt(s): {last_error}"
+        f"update download failed after {tries} attempt(s) for {final}: {last_error}"
     ) from last_error
 
 
@@ -1341,20 +1345,39 @@ def load_update_state(path: Path) -> dict[str, Any]:
 def save_update_state(
     path: Path, info: UpdateInfo | None, *, now: float | None = None
 ) -> None:
-    """Record that a check ran, atomically; failures are ignored."""
+    """Record that a check ran, atomically; failures are ignored.
+
+    The throttle file is written through a unique sibling temporary file that
+    is flushed and fsynced before ``os.replace`` publishes it.  A full disk or
+    a read-only profile therefore leaves the previous file untouched, keeps
+    two concurrent checks from interleaving bytes in one shared temp name, and
+    never leaves a partial ``.tmp`` behind: a failed save is silent, so nothing
+    else would ever clean it up.
+    """
     stamp = time.time() if now is None else now
     payload = {
         "checked_at": stamp,
         "latest": info.latest if info else "",
     }
     target = Path(path)
+    temp: Path | None = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        temp = target.with_name(f"{target.name}.tmp")
-        temp.write_text(json.dumps(payload), encoding="utf-8")
-        temp.replace(target)
+        handle, temp_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
+        )
+        temp = Path(temp_name)
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(json.dumps(payload))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, target)
     except OSError:
         return
+    finally:
+        if temp is not None:
+            with contextlib.suppress(OSError):
+                temp.unlink(missing_ok=True)
 
 
 def check_due(
