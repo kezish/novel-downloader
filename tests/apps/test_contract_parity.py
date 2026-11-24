@@ -67,6 +67,8 @@ EMBEDDED_PORT = 0
 
 #: REST routes deliberately absent from the embedded ``ROUTES`` table.  The
 #: Android client polls; the stdlib server has no Server-Sent Events support.
+#: ``/metrics`` is an operator-facing REST probe and the embedded engine stays
+#: a minimal liveness/contract surface, so it answers ``404`` there.
 #: Anything else missing from the embedded table is drift and fails the tests
 #: below (music routes must exist there as stubs, not be absent).
 ALLOWED_API_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
@@ -74,6 +76,7 @@ ALLOWED_API_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/search/stream"),
         ("GET", "/api/v1/tasks/stream"),
         ("GET", "/api/v1/login/requests/stream"),
+        ("GET", "/api/v1/metrics"),
     }
 )
 

@@ -37,7 +37,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi import Path as PathParam
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.types import Receive, Scope, Send
 
@@ -83,6 +83,11 @@ from .constants import (
     MSG_TASK_NOT_FOUND,
     MSG_TIMED_OUT,
     MSG_UNKNOWN_MUSIC_PLATFORM,
+)
+from .metrics import (
+    METRICS_CACHE_CONTROL,
+    METRICS_RESPONSE_SCHEMA,
+    MetricsRegistry,
 )
 from .schemas import (
     MAX_PER_SITE_LIMIT,
@@ -548,6 +553,53 @@ async def sites() -> dict[str, dict[str, str]]:
         "search": dict(SEARCH_SUPPORT_SITES),
         "download": dict(DOWNLOAD_SUPPORT_SITES),
     }
+
+
+@router.get(
+    "/metrics",
+    tags=["system"],
+    responses={
+        200: {
+            "description": (
+                "Process-local runtime counters. The payload has a fixed shape: "
+                "no path, query string, client IP, keyword or credential is "
+                "ever recorded, so scanning unknown URLs cannot grow it."
+            ),
+            "headers": {
+                "Cache-Control": {
+                    "description": (
+                        "Always 'no-store': the counters are live and must not "
+                        "be cached by a proxy or browser."
+                    ),
+                    "schema": {"type": "string"},
+                }
+            },
+            "content": {"application/json": {"schema": METRICS_RESPONSE_SCHEMA}},
+        }
+    },
+)
+async def metrics(request: Request) -> JSONResponse:
+    """
+    Read-only runtime metrics for this API process.
+
+    Counters cover requests received, completed responses by status class,
+    requests by method, the API's own rejections (rate-limit ``429`` and
+    body-guard ``413``/``415``) and active/peak Server-Sent-Events streams,
+    plus the version, start time and monotonic uptime. Reading never resets a
+    counter; the only increment caused by a scrape is the probe request itself
+    being counted in ``requests.total``.
+
+    Values are per process and per run: a restart starts at zero, and a
+    multi-worker deployment keeps one independent set per worker (the bundled
+    ``novel-api`` runs a single process). Like every other ``/api/v1`` route,
+    the endpoint requires the configured token; without a token it follows the
+    default localhost-only policy.
+    """
+    registry = cast(MetricsRegistry, request.app.state.metrics)
+    return JSONResponse(
+        content=registry.snapshot(),
+        headers={"Cache-Control": METRICS_CACHE_CONTROL},
+    )
 
 
 # ---------------------------------------------------------------------------

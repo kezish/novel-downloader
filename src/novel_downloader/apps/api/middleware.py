@@ -118,6 +118,7 @@ from novel_downloader.apps.common.conditional_get import (
 )
 
 from .auth import AUTH_ERROR_DETAIL, is_authorized
+from .metrics import metrics_from_scope
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +362,13 @@ def _content_length(scope: Scope) -> int | None:
     return None
 
 
+def _record_body_rejection(scope: Scope, status: int) -> None:
+    """Count a body-guard refusal when the app carries a metrics registry."""
+    registry = metrics_from_scope(scope)
+    if registry is not None:
+        registry.record_body_rejection(status)
+
+
 def _is_json_content_type(value: str) -> bool:
     """
     Whether a ``Content-Type`` header value denotes a JSON media type.
@@ -557,6 +565,7 @@ class BodySizeLimitMiddleware:
         if any(encoding not in SUPPORTED_CONTENT_ENCODINGS for encoding in encodings):
             # Unsupported compressed body: reject without reading it, so a
             # compression bomb never reaches a decoder. The value is not echoed.
+            _record_body_rejection(scope, 415)
             response = JSONResponse(
                 status_code=415,
                 content={
@@ -576,6 +585,7 @@ class BodySizeLimitMiddleware:
             # before it is read rather than handed to a parser that would
             # reject it anyway. A bodyless request still fails here only when
             # it deliberately declares a non-JSON type.
+            _record_body_rejection(scope, 415)
             response = JSONResponse(
                 status_code=415,
                 content={"detail": UNSUPPORTED_CONTENT_TYPE_DETAIL},
@@ -615,6 +625,7 @@ class BodySizeLimitMiddleware:
 
     async def _reject(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Send a ``413`` error response without reading the offending body."""
+        _record_body_rejection(scope, 413)
         response = JSONResponse(
             status_code=413,
             content={
@@ -869,6 +880,9 @@ class RateLimitMiddleware:
 
         retry_after = self._register_hit(self._client_ip(scope), _monotonic())
         if retry_after is not None:
+            registry = metrics_from_scope(scope)
+            if registry is not None:
+                registry.record_rate_limited()
             response = JSONResponse(
                 status_code=429,
                 content={

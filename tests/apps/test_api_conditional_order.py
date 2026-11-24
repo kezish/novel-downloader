@@ -46,6 +46,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from novel_downloader.apps.api import create_app
 from novel_downloader.apps.api.app import CORS_ALLOW_HEADERS, CORS_EXPOSE_HEADERS
+from novel_downloader.apps.api.metrics import MetricsMiddleware
 from novel_downloader.apps.api.middleware import (
     CACHE_CONTROL_NO_STORE,
     CACHE_CONTROL_PRIVATE,
@@ -162,6 +163,7 @@ def test_middleware_order_matches_the_documented_matrix(make_app: Any) -> None:
     """
     full = make_app(token=TOKEN, cors=True, rate_limit=120)
     assert [mw.cls for mw in full.user_middleware] == [
+        MetricsMiddleware,
         RequestIdMiddleware,
         RequestLoggingMiddleware,
         SecurityHeadersMiddleware,
@@ -176,6 +178,7 @@ def test_middleware_order_matches_the_documented_matrix(make_app: Any) -> None:
 
     default = make_app(token=TOKEN, rate_limit=120)
     assert [mw.cls for mw in default.user_middleware] == [
+        MetricsMiddleware,
         RequestIdMiddleware,
         RequestLoggingMiddleware,
         SecurityHeadersMiddleware,
