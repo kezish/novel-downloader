@@ -17,12 +17,15 @@ it with a fake via ``app.dependency_overrides`` and never touch the network.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import json
 import logging
 import os
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import aclosing, suppress
 from dataclasses import dataclass
 from datetime import date
@@ -220,6 +223,8 @@ async def _with_timeout(awaitable: Awaitable[_T], timeout: float, label: str) ->
         the same way. Note that cancelling a threadpool job only stops the
         *request* from waiting: the worker thread itself is not interrupted, so
         a stuck provider call keeps running in the background until it returns.
+        Such calls go through :func:`_run_blocking`, whose fixed-size pool keeps
+        those orphaned workers bounded.
     """
     try:
         return await asyncio.wait_for(awaitable, timeout=timeout)
@@ -228,6 +233,59 @@ async def _with_timeout(awaitable: Awaitable[_T], timeout: float, label: str) ->
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail=MSG_TIMED_OUT.format(label=label, timeout=timeout),
         ) from exc
+
+
+#: Worker threads available to the synchronous music engine (search, download,
+#: jobs).
+#:
+#: A Python thread cannot be interrupted, so a request that exceeds its budget
+#: leaves its worker running to completion.  ``starlette.concurrency``'s
+#: ``run_in_threadpool`` is unsuitable for that: cancelling the awaiting task
+#: hands its anyio limiter slot back immediately while the thread keeps
+#: running, so every timed-out (or disconnected) request creates a *new* OS
+#: thread and a long stream of them grows without bound.  A dedicated
+#: :class:`~concurrent.futures.ThreadPoolExecutor` caps the threads for their
+#: whole lifetime; calls beyond the cap queue, and a queued call whose request
+#: times out is cancelled before it ever starts.
+BLOCKING_POOL_WORKERS = 8
+
+#: Name prefix of the pool's threads (tests and diagnostics count on it).
+BLOCKING_POOL_THREAD_PREFIX = "noveldl-api-blocking"
+
+_blocking_pool: ThreadPoolExecutor | None = None
+_blocking_pool_lock = threading.Lock()
+
+
+def _blocking_pool_instance() -> ThreadPoolExecutor:
+    """Return the process-wide blocking-call pool, creating it on first use."""
+    global _blocking_pool
+    with _blocking_pool_lock:
+        pool = _blocking_pool
+        if pool is None:
+            pool = ThreadPoolExecutor(
+                max_workers=BLOCKING_POOL_WORKERS,
+                thread_name_prefix=BLOCKING_POOL_THREAD_PREFIX,
+            )
+            _blocking_pool = pool
+        return pool
+
+
+async def _run_blocking(func: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
+    """
+    Run a synchronous engine call on the bounded pool above.
+
+    Cancelling the awaiting task (a client disconnect or the ``_with_timeout``
+    deadline) stops the request from waiting and drops the result; it cannot
+    stop the worker, so the pool's size is what bounds orphaned workers.  A
+    queued call that is cancelled never runs at all.
+    """
+    # Preserve the request-scoped context (the request id reaches log records
+    # through a context variable) when the call moves to a worker thread.
+    context = contextvars.copy_context()
+    call = functools.partial(context.run, func, *args, **kwargs)
+    return await asyncio.get_running_loop().run_in_executor(
+        _blocking_pool_instance(), call
+    )
 
 
 def task_to_dict(task: DownloadTask) -> dict[str, Any]:
@@ -1988,7 +2046,7 @@ async def music_search(body: MusicSearchRequest, request: Request) -> dict[str, 
     components = _load_music_components()
     if _is_all_platforms(body.platform):
         result = await _with_timeout(
-            run_in_threadpool(
+            _run_blocking(
                 search_all,
                 body.keyword,
                 None,
@@ -2020,9 +2078,7 @@ async def music_search(body: MusicSearchRequest, request: Request) -> dict[str, 
         return int(total or len(tracks)), list(tracks)
 
     timeout = _blocking_timeout(request, "music_search")
-    total, tracks = await _with_timeout(
-        run_in_threadpool(_run), timeout, "Music search"
-    )
+    total, tracks = await _with_timeout(_run_blocking(_run), timeout, "Music search")
     return {
         "total": total,
         "tracks": [_music_track_payload(track) for track in tracks],
@@ -2067,7 +2123,7 @@ async def music_download(
 
     try:
         ok, skip, fail, _failed_pairs, _failed_tracks = await _with_timeout(
-            run_in_threadpool(
+            _run_blocking(
                 components.download_mixed,
                 create_provider,
                 tracks,
@@ -2240,7 +2296,7 @@ async def _run_music_job(
 
     try:
         await asyncio.wait_for(
-            run_in_threadpool(
+            _run_blocking(
                 components.download_mixed,
                 create_provider,
                 tracks,
