@@ -11,7 +11,7 @@ Subcommands::
     remove SITE BOOK_ID            stop following a book
     list [--json]                  show the follow list
     check [--all] [--download]     search the sites for newer chapters
-        [--wait] [--wait-timeout SECS]
+        [--json] [--wait] [--wait-timeout SECS]
 
 ``check`` deliberately performs searches only: when a new chapter is found it
 prints the exact ``novel-cli download`` command instead of starting a download.
@@ -27,6 +27,11 @@ Passing ``--download --wait`` opts in to actually download: the books with new
 chapters are queued in the shared task manager and awaited one by one inside a
 single ``asyncio.run`` (all waiting and ``manager.close()`` happen there, so no
 worker task outlives the CLI process).
+
+``--json`` prints one compact single-line report of the sweep on stdout (the
+human diagnostics stay on stderr). It is rejected together with ``--wait``:
+that mode reports long-running download progress, and a script that wants the
+JSON contract queues the ``command`` values the report already contains.
 """
 
 from __future__ import annotations
@@ -173,6 +178,46 @@ def _error_text(error: BaseException) -> str:
     # Some network/queue errors stringify to an empty string; the type name
     # keeps the report useful in that case.
     return f"{type(error).__name__}: {error}"
+
+
+def _emit_check_report(
+    *,
+    checked: int,
+    changed: int,
+    failed: int,
+    invalid: int,
+    books: list[dict[str, object]],
+) -> None:
+    """
+    Print the ``follow check --json`` sweep report as one compact line.
+
+    Everything the command learned about the sweep is in the document:
+    aggregate counters (``checked``, ``changed``, ``failed``, ``invalid``),
+    one record per followed book, and ``ok`` as the single boolean a script
+    should branch on -- ``False`` exactly when the exit code is non-zero
+    (a check or storage failure, or unusable watchlist entries). Human
+    diagnostics never take part in this stream; they stay on stderr.
+
+    Fields per book: ``site``, ``book_id``, ``title``, ``status``
+    (``"new"`` / ``"up_to_date"`` / ``"not_found"`` / ``"error"``), ``latest``
+    (newest observed chapter, ``""`` when none), ``previous`` (the chapter
+    recorded before this sweep), ``error`` (message or ``null``) and
+    ``command`` (the download hint, only with ``--download``, else ``null``).
+    """
+    ui.emit(
+        json.dumps(
+            {
+                "ok": failed == 0 and invalid == 0,
+                "checked": checked,
+                "changed": changed,
+                "failed": failed,
+                "invalid": invalid,
+                "books": books,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
 
 
 @dataclass
@@ -516,6 +561,12 @@ class FollowCheckCmd(Command):
             help=t("Print the download command for books with new chapters."),
         )
         parser.add_argument(
+            "--json",
+            dest="as_json",
+            action="store_true",
+            help=t("Print machine-readable JSON on stdout and exit."),
+        )
+        parser.add_argument(
             "--wait",
             action="store_true",
             help=t(
@@ -544,8 +595,14 @@ class FollowCheckCmd(Command):
     @classmethod
     def run(cls, args: Namespace) -> None:
         wait = bool(args.wait)
+        as_json = bool(args.as_json)
         if wait and not args.download:
             fail(t("--wait requires --download."), EXIT_USAGE)
+        # ``--wait`` is a long, progress-reporting operation; its outcome is an
+        # exit code, not a document. Refusing the combination keeps both
+        # contracts unambiguous (and matches ``storage --json --clean``).
+        if wait and as_json:
+            fail(t("--json cannot be combined with --wait."), EXIT_USAGE)
 
         # Validate both durations before touching the watchlist or the
         # network, so a bad value is a pure usage error.
@@ -568,8 +625,24 @@ class FollowCheckCmd(Command):
                     path=store.path, err=t("Invalid input.")
                 )
             )
-        entries = store.entries()
+        entries = [
+            entry
+            for entry in store.entries()
+            # The store keeps these (it only drops entries without an
+            # identity), but a value that would escape the data directory can
+            # neither be searched meaningfully nor queued -- ``add_task``
+            # rejects it. ``invalid`` above already counts them, so skip them
+            # here instead of reporting a check failure for each one.
+            if is_safe_path_component(entry.site)
+            and is_safe_path_component(entry.book_id)
+        ]
         if not entries:
+            if as_json:
+                # The document is still emitted: an empty watchlist is a
+                # successful sweep, not a missing answer.
+                _emit_check_report(
+                    checked=0, changed=0, failed=0, invalid=invalid, books=[]
+                )
             if invalid:
                 raise SystemExit(EXIT_FAILURE)
             ui.info(t("No followed books to check."))
@@ -577,20 +650,37 @@ class FollowCheckCmd(Command):
 
         # check_all searches the books with bounded concurrency, persists every
         # new chapter it finds and returns the results in follow-list order.
-        outcomes: list[CheckResult] = asyncio.run(check_all(store, timeout))
+        # ``entries`` is passed explicitly so the unusable entries filtered out
+        # above are neither searched nor written back.
+        outcomes: list[CheckResult] = asyncio.run(
+            check_all(store, timeout, entries=entries)
+        )
 
         show_all = bool(args.all)
         changed = 0
         failed = 0
         hints: list[str] = []
         download_targets: list[WatchEntry] = []
+        records: list[dict[str, object]] = []
 
         for outcome in outcomes:
             entry = outcome.entry
             label = f"{entry.site}/{entry.book_id}"
+            record: dict[str, object] = {
+                "site": entry.site,
+                "book_id": entry.book_id,
+                "title": entry.title,
+                "status": "error",
+                "latest": "",
+                "previous": entry.last_chapter,
+                "error": None,
+                "command": None,
+            }
+            records.append(record)
 
             if outcome.error is not None:
                 failed += 1
+                record["error"] = outcome.error
                 ui.error(
                     t("Check failed for {book}: {error}").format(
                         book=label, error=outcome.error
@@ -599,6 +689,7 @@ class FollowCheckCmd(Command):
                 continue
 
             if not outcome.found:
+                record["status"] = "not_found"
                 if show_all:
                     ui.info(t("No result found for {book}.").format(book=label))
                 elif entry.last_chapter:
@@ -609,7 +700,9 @@ class FollowCheckCmd(Command):
                     ui.warn(t("No result found for {book}.").format(book=label))
                 continue
 
+            record["latest"] = outcome.latest
             if not outcome.changed:
+                record["status"] = "up_to_date"
                 if show_all:
                     ui.info(
                         t("Up to date: {book} ({latest})").format(
@@ -620,6 +713,7 @@ class FollowCheckCmd(Command):
 
             was_known = bool(entry.last_chapter)
             changed += 1
+            record["status"] = "new"
             message = (
                 t("New chapter for {book}: {latest}")
                 if was_known
@@ -627,12 +721,15 @@ class FollowCheckCmd(Command):
             )
             ui.success(message.format(book=label, latest=outcome.latest))
             if args.download:
+                hint = f"novel-cli download --site {entry.site} {entry.book_id}"
                 if wait:
                     download_targets.append(entry)
+                elif as_json:
+                    # The JSON consumer gets the command in the document; the
+                    # human hint would only duplicate it on stderr.
+                    record["command"] = hint
                 else:
-                    hints.append(
-                        f"novel-cli download --site {entry.site} {entry.book_id}"
-                    )
+                    hints.append(hint)
 
         downloads_ok = True
         if args.download and wait:
@@ -661,6 +758,15 @@ class FollowCheckCmd(Command):
             # the overall result (and the non-zero exit) visible in a long
             # list of followed books.
             ui.error(t("{count} check(s) failed.").format(count=failed))
+
+        if as_json:
+            _emit_check_report(
+                checked=len(outcomes),
+                changed=changed,
+                failed=failed,
+                invalid=invalid,
+                books=records,
+            )
 
         if failed or invalid or not downloads_ok:
             raise SystemExit(EXIT_FAILURE)

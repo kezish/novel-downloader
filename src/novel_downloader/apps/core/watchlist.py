@@ -83,7 +83,7 @@ import os
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -753,6 +753,8 @@ async def check_all(
     timeout: float = DEFAULT_CHECK_TIMEOUT,
     max_concurrency: int = DEFAULT_CHECK_CONCURRENCY,
     progress_cb: Callable[[CheckResult], None] | None = None,
+    *,
+    entries: Sequence[WatchEntry] | None = None,
 ) -> list[CheckResult]:
     """
     Check every followed book in ``store`` for a new chapter.
@@ -770,10 +772,14 @@ async def check_all(
     :param progress_cb: Optional observer called once per finished check, in
         completion order (not list order), on the event loop thread. A raising
         callback is logged and ignored so it cannot abort the sweep.
-    :return: One :class:`CheckResult` per entry, in the store's entry order
+    :param entries: Books to check; defaults to every entry in ``store``. The
+        CLI passes the usable subset so an entry whose ``site``/``book_id``
+        cannot be searched (and could not be queued for download) is neither
+        searched nor persisted.
+    :return: One :class:`CheckResult` per checked entry, in the given order
         regardless of the order the checks completed in.
     """
-    entries = store.entries()
+    entries = store.entries() if entries is None else list(entries)
     semaphore = asyncio.Semaphore(max(1, int(max_concurrency)))
     slots: list[CheckResult | None] = [None] * len(entries)
 

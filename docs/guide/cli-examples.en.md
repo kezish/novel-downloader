@@ -793,7 +793,7 @@ novel-cli follow [-h] {add,remove,list,check} ...
 novel-cli follow add [-h] [--title TEXT] site book_id
 novel-cli follow remove [-h] site book_id
 novel-cli follow list [-h] [--json]
-novel-cli follow check [-h] [--all] [--download] [--wait]
+novel-cli follow check [-h] [--all] [--download] [--json] [--wait]
                        [--wait-timeout SECS] [--timeout SECS]
 ```
 
@@ -830,6 +830,7 @@ Each `--json` element contains `site`, `book_id`, `title`, `last_chapter`, and `
 
 * `--all`: also show books that are up to date or could not be found; without it only new chapters and errors are reported.
 * `--download`: print an executable `novel-cli download ...` command for each book with new chapters.
+* `--json`: print one compact single-line JSON report of the sweep on stdout (fields in the `--json` table at the end of this document); human-readable diagnostics still go to stderr. Cannot be combined with `--wait` (usage error, exit code `2`).
 * `--wait`: used with `--download`, actually download: queue each new-chapter book in the task manager and wait for it to finish before starting the next one.
 * `--wait-timeout SECS`: max seconds to wait for each download, default `1800`; only effective with `--wait`.
 * `--timeout SECS`: search timeout per book, default `5.0` seconds.
@@ -862,9 +863,26 @@ Semantics of `--wait`:
 * **Exit code**: `0` is returned only when no check failed and every download completed; any failed check, or any download that failed/was cancelled/timed out, ends the command with `1`.
 * `--wait` requires `--download`; on its own it is a usage error (exit code `2`).
 
+`--json` prints one compact single-line JSON object: `{"ok", "checked", "changed", "failed", "invalid", "books"}`.
+
+* `checked`: number of books checked (the follow list deduplicated by `(site, book_id)`).
+* `changed`: books with a new chapter (`status` is `new`).
+* `failed`: books whose check failed (network, plugin, or writing the follow list).
+* `invalid`: follow-list entries that cannot be used (missing `site`/`book_id`, or a value that would escape the data directory). They are not checked; their presence makes `ok` `false` and the exit code `1`.
+* `ok`: true exactly when `failed == 0` and `invalid == 0`, matching exit code `0`.
+* `books`: in follow-list order, each with `site`, `book_id`, `title`, `status` (`new` / `up_to_date` / `not_found` / `error`), `latest`, `previous`, `error`, and `command`. `command` is non-`null` only with `--download` and only for a book with a new chapter.
+* `--all` changes only the human-readable output; `--json` always carries a record for every book.
+* A follow list that cannot be parsed prints no JSON: the error goes to stderr and the command exits `1` (nothing was checked).
+
 > The first check of a book only records the current latest chapter (reported as `First chapter recorded ...`), so it is not mistaken for an update.
 >
 > If any book's check fails (network/plugin error), the command exits with code `1` even when the other books succeeded.
+>
+> Duplicate `(site, book_id)` entries in the follow file are folded on read and checked once, so `--download --wait` never queues the same book twice.
+>
+> Re-running `follow check` is idempotent: once a new chapter is stored in `last_chapter`, the next check reports `up_to_date` and queues nothing.
+>
+> Pressing Ctrl+C during `--download --wait` cancels the in-flight download through the task manager (final status `CANCELLED`); the later books were never queued. The CLI prints `Aborted.` on stderr and exits `1`.
 
 ---
 
@@ -1432,7 +1450,7 @@ novel-cli update --json
 | --- | --- | --- |
 | `0` | Success | The command completed; no search results or no new chapters is still success |
 | `1` | Runtime failure | Network/site error, login failure, unparsable configuration, incomplete download/export, any failed follow check, a follow `--wait` download that did not succeed, a required `doctor` check failing, a failed structural `sources list --check`, a failed removal in `storage --clean` / `clean`, a failed `storage backup` (including a post-write verification failure, which rolls back the whole set) / `restore`, any failed `music health` platform, any failed `music download` song, unmatched/malformed/download-failed entries in `batch`, a failed `update` check (also no asset for the platform, missing digest, or a failed download with `--yes`) |
-| `2` | Usage error | Missing/conflicting arguments (including argparse errors), an empty `--site`/`--start`/`--end` for `download` (a whitespace-only value counts as empty), `--json` with `--first`, `storage`'s `--json` with `--clean` (without `--dry-run`), `clean cache`/`clean book` `--json` without `--dry-run`, `storage --dry-run` without `--clean`, `storage restore` replacing an existing database without `--force`, targeting a path outside `raw_data_dir`, targeting through a symbolic link, or restoring a set into the backup directory, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell, an unknown `music --platform`, `batch` without an input file or with a negative `--interval`, `clean --site` given a traversal value such as `..` or a path separator |
+| `2` | Usage error | Missing/conflicting arguments (including argparse errors), an empty `--site`/`--start`/`--end` for `download` (a whitespace-only value counts as empty), `--json` with `--first`, `storage`'s `--json` with `--clean` (without `--dry-run`), `clean cache`/`clean book` `--json` without `--dry-run`, `storage --dry-run` without `--clean`, `storage restore` replacing an existing database without `--force`, targeting a path outside `raw_data_dir`, targeting through a symbolic link, or restoring a set into the backup directory, no URL/book ID, unsupported `config set-lang` language, `music` without a keyword or without `--pick`/`--yes` in a non-interactive shell, an unknown `music --platform`, `batch` without an input file or with a negative `--interval`, `follow check` `--json` with `--wait`, `clean --site` given a traversal value such as `..` or a path separator |
 
 The `update --check` exit code reports whether the **check** succeeded, not whether an update exists: finding one still returns `0`. `sources list --probe` never changes the exit code by itself — network unreachability only shows as `-` in the `Latency`/`HTTP` columns, and only a failed structural `--check` exits with `1`.
 
@@ -1458,6 +1476,7 @@ With `--json`:
 | `music platforms` | `--json` | `{platform key: display name}` object |
 | `music health` | `--json` | `{"keyword", "platforms": [{"platform", "ok", "elapsed_ms", "error"}], "failed"}`; field names match `GET /api/v1/music/health` |
 | `follow list` | `--json` | Array with `site`, `book_id`, `title`, `last_chapter`, `updated_at` |
+| `follow check` | `--json` | `{"ok", "checked", "changed", "failed", "invalid", "books"}`; `books[]` has `site`, `book_id`, `title`, `status` (`new`/`up_to_date`/`not_found`/`error`), `latest`, `previous`, `error`, `command` (`command` is non-`null` only with `--download` and only for a book with a new chapter); strictly single-line, compact JSON; combining it with `--wait` is a usage error (`2`) |
 | `clean cache` | `--dry-run --json` | `{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`; `command` is `clean cache`, `book_id` is `null`, `book_ids` is `[]`; each `items[]` entry has `path`, `kind`, `files`, `bytes` |
 | `clean book` | `--dry-run --json` | `{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`; `command` is `clean book`; `book_id` is the ID when exactly one book is cleaned, otherwise `null` (multiple books or a whole-site clean); `items[]` as above |
 | `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` (dir and total fields are described above) |
@@ -1474,6 +1493,9 @@ novel-cli search --site b520 --json "Three Body" | jq -r '.[0].book_id'
 # Count follow-list entries
 novel-cli follow list --json | jq 'length'
 
+# Check for new chapters and count the books that changed
+novel-cli follow check --json | jq '.changed'
+
 # Read the total bytes used
 novel-cli storage --json | jq '.total.bytes'
 ```
@@ -1488,7 +1510,7 @@ stdout carries normal command output (`--json`, completion scripts, `--help`, an
 
 * **Redirects / pipes**: stdout and stderr are written as UTF-8 with no BOM. `--json` uses `ensure_ascii=False`, so CJK text and emoji stay intact instead of becoming `\uXXXX`. Help, logs, and Rich diagnostics no longer mix in cp936/GBK bytes.
 * **Interactive terminal (TTY)**: the encoding is left alone; help, logs, and progress render in the console's native encoding, and colour, width, and progress-bar behaviour are unchanged. `--json` is the exception: its data stream is always UTF-8.
-* **`--json`**: stdout contains exactly one JSON document; logs and hints never mix in. `download`, `search`, `export`, `sources list`, `update`, `music *`, `clean * --dry-run`, `storage backup|verify|restore`, and `doctor` emit **strictly single-line, compact JSON**: no newline other than the final terminator, so a line-oriented reader can consume one record per line. `browse`, `follow list`, and `storage` still use `indent=2` multi-line JSON; they are still one UTF-8 document, but do not assume a single line.
+* **`--json`**: stdout contains exactly one JSON document; logs and hints never mix in. `download`, `search`, `export`, `sources list`, `update`, `music *`, `clean * --dry-run`, `storage backup|verify|restore`, `doctor`, and `follow check` emit **strictly single-line, compact JSON**: no newline other than the final terminator, so a line-oriented reader can consume one record per line. `browse`, `follow list`, and `storage` still use `indent=2` multi-line JSON; they are still one UTF-8 document, but do not assume a single line.
 
 Before v1.34.1 the frozen CLI guaranteed UTF-8 only for machine-readable stdout (`--json` and completion scripts); redirected help and logs still followed the system code page (for example cp936), which could mix encodings in one capture. For source runs (`pip install` / `python -m`), `--json` stdout is likewise always UTF-8, but help and logs follow Python's locale; start with `PYTHONUTF8=1` if you need everything UTF-8 there too.
 

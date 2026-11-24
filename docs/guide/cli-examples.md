@@ -769,7 +769,7 @@ novel-cli follow [-h] {add,remove,list,check} ...
 novel-cli follow add [-h] [--title TEXT] site book_id
 novel-cli follow remove [-h] site book_id
 novel-cli follow list [-h] [--json]
-novel-cli follow check [-h] [--all] [--download] [--wait]
+novel-cli follow check [-h] [--all] [--download] [--json] [--wait]
                        [--wait-timeout SECS] [--timeout SECS]
 ```
 
@@ -806,6 +806,7 @@ novel-cli follow list --json
 
 * `--all`: 同时显示已是最新的书籍和未找到结果的书籍; 省略时只报告新章节和错误。
 * `--download`: 对发现新章节的书打印可直接执行的 `novel-cli download ...` 命令。
+* `--json`: 在标准输出打印一份单行紧凑 JSON 报告 (字段见文末 `--json` 表格); 人类可读的诊断仍在 stderr。不能与 `--wait` 同用 (用法错误, 退出码 `2`)。
 * `--wait`: 配合 `--download` 使用, 实际执行下载: 把有新章节的书在任务管理器中逐本排队下载, 并等待每本结束后再处理下一本。
 * `--wait-timeout SECS`: 每本下载的等待上限 (秒), 默认 `1800`; 仅在 `--wait` 下生效。
 * `--timeout SECS`: 每本书的搜索超时, 默认 `5.0` 秒。
@@ -837,9 +838,26 @@ novel-cli follow check --download --wait --wait-timeout 3600
 * **退出码**: 只有没有检查失败且所有下载都成功完成时才返回 `0`; 任意检查失败, 或任意一本下载失败/取消/超时, 都以 `1` 结束。
 * `--wait` 必须与 `--download` 同用, 否则属于用法错误 (退出码 `2`)。
 
+`--json` 的输出是一份单行紧凑 JSON 对象: `{"ok", "checked", "changed", "failed", "invalid", "books"}`。
+
+* `checked`: 本次检查的书数 (追更列表按 `(site, book_id)` 去重后的数量)。
+* `changed`: 发现新章节 (`status` 为 `new`) 的书数。
+* `failed`: 检查失败的书数 (网络、插件或写入追更文件出错)。
+* `invalid`: 追更文件中无法使用的条目数 (缺 `site`/`book_id`, 或取值会逃出数据目录)。这些条目不会参与检查; 只要存在, `ok` 即为 `false`, 退出码为 `1`。
+* `ok`: 当且仅当 `failed == 0` 且 `invalid == 0`, 与退出码 `0` 一一对应。
+* `books`: 按追更列表顺序排列, 每项含 `site`、`book_id`、`title`、`status` (`new` / `up_to_date` / `not_found` / `error`)、`latest`、`previous`、`error`、`command`。`command` 仅在同时给出 `--download` 且该书有更新时非 `null`。
+* `--all` 只改变人类可读输出; `--json` 始终包含每本书的记录。
+* 追更文件本身无法解析时不会输出 JSON: 错误写到 stderr, 以 `1` 退出 (什么都没有检查)。
+
 > 首次检查某本书时, 只会记录当前最新章节 (显示为 `First chapter recorded ...`), 不会误报为更新。
 >
 > 只要有任意一本书检查失败 (网络/插件异常), 命令最终以退出码 `1` 结束, 即使其它书检查成功。
+>
+> 追更文件里重复的 `(site, book_id)` 在读取时就被去重, 只检查一次, 因此 `--download --wait` 不会为同一本书重复排队。
+>
+> 重复运行 `follow check` 是幂等的: 新章节写入 `last_chapter` 后, 下一次检查得到 `up_to_date`, 不会再次排队或下载。
+>
+> `--download --wait` 期间按 `Ctrl+C`: 当前下载任务由任务管理器取消 (终态 `CANCELLED`), 后面的书尚未入队, CLI 在 stderr 输出 `Aborted.` 并以 `1` 退出。
 
 ---
 
@@ -1398,7 +1416,7 @@ novel-cli update --json
 | --- | --- | --- |
 | `0` | 成功 | 命令正常完成; 搜索无结果、追更无新章节也属于成功 |
 | `1` | 运行时失败 | 网络/站点错误、登录失败、配置无法解析、下载或导出未完成、任意追更检查失败、追更 `--wait` 有下载未成功完成、`doctor` 必需项失败、`sources list --check` 结构校验失败、`storage --clean`/`clean` 删除失败、`storage backup` (含写入后校验失败, 整组回滚)/`restore` 备份或恢复失败、`music health` 有平台失败、`music download` 有歌曲失败、`batch` 存在未匹配/格式错误/下载失败、`update` 检查失败 (以及 `--yes` 时无匹配资产、缺少摘要或下载失败) |
-| `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`download` 的 `--site`/`--start`/`--end` 传入空字符串 (仅含空白也算空)、`--json` 与 `--first` 同用、`storage` 的 `--json` 与 `--clean` 同用 (未加 `--dry-run`)、`clean cache`/`clean book` 的 `--json` 未与 `--dry-run` 同用、`storage --dry-run` 未与 `--clean` 同用、`storage restore` 覆盖已有数据库未加 `--force`、目标不在 `raw_data_dir` 内、目标经过符号链接、或把备份恢复到备份目录自身、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes`、`music` 的 `--platform` 传入未知平台、`batch` 未提供输入文件或 `--interval` 为负、`clean --site` 传入 `..`/路径分隔符等越界值 |
+| `2` | 用法错误 | 缺少或冲突的命令行参数 (含 argparse 的参数错误)、`download` 的 `--site`/`--start`/`--end` 传入空字符串 (仅含空白也算空)、`--json` 与 `--first` 同用、`storage` 的 `--json` 与 `--clean` 同用 (未加 `--dry-run`)、`clean cache`/`clean book` 的 `--json` 未与 `--dry-run` 同用、`storage --dry-run` 未与 `--clean` 同用、`storage restore` 覆盖已有数据库未加 `--force`、目标不在 `raw_data_dir` 内、目标经过符号链接、或把备份恢复到备份目录自身、未提供 URL/书籍 ID、`config set-lang` 传入不支持的语言、`music` 缺少关键字或非交互环境下未给 `--pick`/`--yes`、`music` 的 `--platform` 传入未知平台、`batch` 未提供输入文件或 `--interval` 为负、`follow check` 的 `--json` 与 `--wait` 同用、`clean --site` 传入 `..`/路径分隔符等越界值 |
 
 `update --check` 的退出码表示**检查**是否成功, 而不是是否有新版本: 发现有更新仍返回 `0`。`sources list --probe` 本身不改变退出码——网络不可达只在 `Latency`/`HTTP` 列显示为 `-`, 只有 `--check` 的结构校验失败才会以 `1` 退出。
 
@@ -1424,6 +1442,7 @@ novel-cli update --json
 | `music platforms` | `--json` | `{平台 key: 显示名}` 对象 |
 | `music health` | `--json` | `{"keyword", "platforms": [{"platform", "ok", "elapsed_ms", "error"}], "failed"}`; 字段名与 `GET /api/v1/music/health` 一致 |
 | `follow list` | `--json` | 数组, 每项含 `site`、`book_id`、`title`、`last_chapter`、`updated_at` |
+| `follow check` | `--json` | `{"ok", "checked", "changed", "failed", "invalid", "books"}`; `books[]` 含 `site`、`book_id`、`title`、`status` (`new`/`up_to_date`/`not_found`/`error`)、`latest`、`previous`、`error`、`command` (`command` 仅在 `--download` 且该书有更新时非 `null`); 单行紧凑 JSON; 与 `--wait` 同用是用法错误 (`2`) |
 | `clean cache` | `--dry-run --json` | `{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`; `command` 为 `clean cache`, `book_id` 为 `null`、`book_ids` 为 `[]`; `items[]` 含 `path`、`kind`、`files`、`bytes` |
 | `clean book` | `--dry-run --json` | `{"dry_run", "command", "site", "book_id", "book_ids", "items", "paths", "files", "bytes"}`; `command` 为 `clean book`; `book_id` 仅在只清理一本书时为该 ID, 多本书或整站清理时为 `null`; `items[]` 同上 |
 | `storage` | `--json` | `{"raw", "cache", "downloads", "logs", "total"}` (dir 与 total 字段见上文) |
@@ -1440,6 +1459,9 @@ novel-cli search --site b520 --json "三体" | jq -r '.[0].book_id'
 # 检查追更列表并统计条目数
 novel-cli follow list --json | jq 'length'
 
+# 检查新章节并统计有更新的书
+novel-cli follow check --json | jq '.changed'
+
 # 读取存储占用总字节数
 novel-cli storage --json | jq '.total.bytes'
 ```
@@ -1454,7 +1476,7 @@ stdout 承载命令的正常输出 (`--json`、补全脚本、`--help` 等), std
 
 * **重定向 / 管道**: stdout 与 stderr 都按 UTF-8 写出, 无 BOM; `--json` 使用 `ensure_ascii=False`, 中文和 emoji 原样保留, 不会变成 `\uXXXX`。帮助、日志和 Rich 诊断同样不再混入 cp936/GBK 字节。
 * **交互终端 (TTY)**: 不强制改写编码, 帮助、日志和进度按控制台原生编码渲染, 颜色、宽度和进度条行为不变。`--json` 的数据流是例外, 始终为 UTF-8。
-* **`--json`**: stdout 只输出一份 JSON 文档, 日志和提示不会混入。`download`、`search`、`export`、`sources list`、`update`、`music *`、`clean * --dry-run`、`storage backup|verify|restore`、`doctor` 为**严格单行紧凑 JSON**: 除结尾换行外没有其他换行符, 可直接按行读取。`browse`、`follow list`、`storage` 仍使用 `indent=2` 多行格式; 它们同样是 UTF-8 的单份文档, 但不要假设只有一行。
+* **`--json`**: stdout 只输出一份 JSON 文档, 日志和提示不会混入。`download`、`search`、`export`、`sources list`、`update`、`music *`、`clean * --dry-run`、`storage backup|verify|restore`、`doctor`、`follow check` 为**严格单行紧凑 JSON**: 除结尾换行外没有其他换行符, 可直接按行读取。`browse`、`follow list`、`storage` 仍使用 `indent=2` 多行格式; 它们同样是 UTF-8 的单份文档, 但不要假设只有一行。
 
 v1.34.1 之前, 冻结 CLI 只有机器可读的 stdout (`--json` 与补全脚本) 固定 UTF-8; 重定向后的帮助和日志仍按系统代码页 (如 cp936) 编码, 可能与 JSON 混在一起。源码运行 (`pip install` / `python -m`) 的 `--json` stdout 同样始终是 UTF-8, 但帮助和日志跟随 Python 的 locale; 需要在源码运行下也统一为 UTF-8 时, 用 `PYTHONUTF8=1` 启动。
 
