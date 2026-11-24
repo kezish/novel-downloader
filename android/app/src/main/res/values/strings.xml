@@ -295,6 +295,11 @@
     <string name="settings_standalone_on">独立引擎已开启，正在本地启动…</string>
     <string name="settings_standalone_off">已切回远程 API 模式</string>
     <string name="settings_standalone_error">独立引擎启动失败：%1$s</string>
+    <string name="settings_standalone_starting">独立引擎启动中…</string>
+    <string name="settings_standalone_ready">独立引擎运行中</string>
+    <string name="settings_standalone_error_port">8081–8084 端口均被占用</string>
+    <string name="settings_standalone_error_timeout">启动超时（健康检查未通过）</string>
+    <string name="settings_standalone_error_exited">引擎启动后立即退出</string>
 
     <!-- 更新 -->
     <string name="update_dialog_title">发现新版本</string>

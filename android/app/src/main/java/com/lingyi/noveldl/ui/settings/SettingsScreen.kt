@@ -1,5 +1,6 @@
 package com.lingyi.noveldl.ui.settings
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -55,6 +56,8 @@ import com.lingyi.noveldl.data.Api
 import com.lingyi.noveldl.data.ApiSettings
 import com.lingyi.noveldl.data.DownloadTarget
 import com.lingyi.noveldl.data.EmbeddedEngine
+import com.lingyi.noveldl.data.EmbeddedEngineFailure
+import com.lingyi.noveldl.data.EmbeddedEngineStatus
 import com.lingyi.noveldl.data.HistoryDownloader
 import com.lingyi.noveldl.data.SettingsStore
 import com.lingyi.noveldl.data.UpdateCenter
@@ -82,6 +85,10 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     val settings by store.settings.collectAsState(initial = ApiSettings())
     val updatePhase by UpdateCenter.phase.collectAsState()
+    // Engine status is a StateFlow updated by the bootstrap thread, so the
+    // error/starting/running line below recomposes when the start fails or the
+    // server dies instead of only when the settings flow re-emits.
+    val engine by EmbeddedEngine.snapshots.collectAsState()
     // Keyed on the saved URL/key only: picking a download directory re-emits
     // `settings` and must not wipe unsaved text-field edits.
     var baseUrl by remember(settings.baseUrl, settings.apiKey) { mutableStateOf(settings.baseUrl) }
@@ -119,6 +126,9 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             // quickly by Save could still see the old `standalone` value and
             // point the app back at the remote URL.
             val latest = store.settings.first()
+            // A save in standalone mode is also the user's retry signal after
+            // a failed start; idempotent while starting/ready.
+            if (latest.standalone) EmbeddedEngine.ensureStarted(context)
             // In standalone mode the engine stays the API target; the typed
             // URL is persisted for when the user switches back.
             val target = latest.configureTargetUrl(baseUrl)
@@ -146,6 +156,7 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             // Same freshness rule as save(): test the target the switch is
             // actually in, not a possibly stale snapshot of the flow.
             val latest = store.settings.first()
+            if (latest.standalone) EmbeddedEngine.ensureStarted(context)
             Api.configure(
                 latest.configureTargetUrl(baseUrl),
                 apiKey,
@@ -244,7 +255,15 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
             // fresh so a just-saved edit is used.
             val latest = store.settings.first()
             store.saveStandalone(enabled)
-            if (enabled) EmbeddedEngine.ensureStarted(context)
+            if (enabled) {
+                EmbeddedEngine.ensureStarted(context)
+            } else {
+                // Switching to a remote API must invalidate the local engine:
+                // its generation flips to STOPPED immediately and the Python
+                // shutdown is queued, so no later request targets a stale
+                // loopback port.
+                EmbeddedEngine.stop()
+            }
             // The toggle must take effect immediately: without reconfiguring,
             // the app would keep talking to the previous base URL until the
             // process restarts.
@@ -253,17 +272,25 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
                 latest.apiKey,
                 embeddedEngine = enabled,
             )
-            if (enabled && !usable) {
-                // The engine URL is always valid; unreachable in practice,
-                // kept as a guard.
-                onMessage(
+            val failure = if (enabled) EmbeddedEngine.lastFailure else null
+            when {
+                enabled && !usable -> {
+                    // The engine URL is always valid; unreachable in practice,
+                    // kept as a guard.
+                    onMessage(
+                        context.getString(
+                            R.string.settings_url_invalid,
+                            Api.baseUrl,
+                        ),
+                    )
+                }
+                failure != null -> onMessage(
                     context.getString(
-                        R.string.settings_url_invalid,
-                        Api.baseUrl,
+                        R.string.settings_standalone_error,
+                        embeddedFailureMessage(context, failure, EmbeddedEngine.lastError),
                     ),
                 )
-            } else {
-                onMessage(
+                else -> onMessage(
                     context.getString(
                         if (enabled) {
                             R.string.settings_standalone_on
@@ -385,12 +412,30 @@ fun SettingsScreenView(store: SettingsStore, onMessage: (String) -> Unit) {
                 modifier = Modifier.clearAndSetSemantics {},
             )
         }
-        if (settings.standalone && EmbeddedEngine.lastError != null) {
-            Text(
-                stringResource(R.string.settings_standalone_error, EmbeddedEngine.lastError.orEmpty()),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-            )
+        if (settings.standalone) {
+            when (engine.status) {
+                EmbeddedEngineStatus.STARTING -> Text(
+                    stringResource(R.string.settings_standalone_starting),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                EmbeddedEngineStatus.READY -> Text(
+                    stringResource(R.string.settings_standalone_ready),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                EmbeddedEngineStatus.FAILED -> Text(
+                    stringResource(
+                        R.string.settings_standalone_error,
+                        embeddedFailureMessage(context, engine.failure, engine.lastError),
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                // IDLE/STOPPED: the switch is still catching up with the
+                // engine, or it was just switched off; no line is truthful yet.
+                EmbeddedEngineStatus.IDLE, EmbeddedEngineStatus.STOPPED -> Unit
+            }
         }
 
         Spacer(Modifier.height(16.dp))
@@ -683,3 +728,24 @@ internal fun updateFailureText(failed: UpdatePhase.Failed): String = when (faile
 
 internal fun formatUpdateTime(millis: Long): String =
     SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(millis))
+
+/**
+ * Localized reason for a failed embedded-engine start.
+ *
+ * The transport/exception detail stays as the `%s` argument of
+ * [R.string.settings_standalone_error]; the known startup causes get their
+ * own sentence so a Chinese UI does not show an English OSError.
+ */
+private fun embeddedFailureMessage(
+    context: Context,
+    failure: EmbeddedEngineFailure?,
+    detail: String?,
+): String = when (failure) {
+    EmbeddedEngineFailure.PORT_BUSY ->
+        context.getString(R.string.settings_standalone_error_port)
+    EmbeddedEngineFailure.TIMEOUT ->
+        context.getString(R.string.settings_standalone_error_timeout)
+    EmbeddedEngineFailure.EXITED ->
+        context.getString(R.string.settings_standalone_error_exited)
+    else -> detail.orEmpty()
+}

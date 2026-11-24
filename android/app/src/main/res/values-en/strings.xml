@@ -283,6 +283,11 @@
     <string name="settings_standalone_on">Standalone engine on — starting locally…</string>
     <string name="settings_standalone_off">Switched back to remote API mode</string>
     <string name="settings_standalone_error">Embedded engine failed to start: %1$s</string>
+    <string name="settings_standalone_starting">Standalone engine starting…</string>
+    <string name="settings_standalone_ready">Standalone engine running</string>
+    <string name="settings_standalone_error_port">ports 8081–8084 are all in use</string>
+    <string name="settings_standalone_error_timeout">start timed out (health check failed)</string>
+    <string name="settings_standalone_error_exited">the engine exited immediately after starting</string>
 
     <!-- Updates -->
     <string name="update_dialog_title">Update available</string>

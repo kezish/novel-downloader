@@ -129,11 +129,18 @@ internal class BoundedResponseBody(
  * request that actually went over the wire, so an application interceptor
  * would only ever see the first URL and could not notice a cross-host
  * redirect.
+ *
+ * [credential] is resolved per request, not captured once: the embedded
+ * engine regenerates its token on every (re)start, and a stop/restart cycle
+ * must not keep sending the previous process's token.
  */
 internal class ApiOriginPolicy(
     private val origin: ApiOrigin,
-    private val apiKey: String,
+    private val credential: () -> String,
 ) {
+    /** Fixed-credential form, kept for tests and one-shot clients. */
+    constructor(origin: ApiOrigin, apiKey: String) : this(origin, { apiKey })
+
     fun interceptor(): Interceptor = Interceptor { chain ->
         val request = chain.request()
         val url = request.url
@@ -152,7 +159,8 @@ internal class ApiOriginPolicy(
             url.port == origin.port
         val builder = request.newBuilder()
         if (sameOrigin) {
-            if (apiKey.isNotEmpty()) builder.header(DOWNLOAD_API_KEY_HEADER, apiKey)
+            val key = credential()
+            if (key.isNotEmpty()) builder.header(DOWNLOAD_API_KEY_HEADER, key)
         } else {
             // A redirect (or a server-supplied absolute download URL) must not
             // carry our credentials to another host.
