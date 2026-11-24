@@ -5,7 +5,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit,quote
+from urllib.parse import urlsplit
 from .bridge import register_sources,encode52
 from .compiler import ROOT
 from novel_downloader.plugins.registry import registrar
@@ -28,27 +28,14 @@ def resolve(url):
         return "sk_czbooks",m[1]
     raise ValueError("unsupported book URL")
 
-async def query(keyword,sites):
+async def query(keyword,sites,cursors=None):
+    from .paged_search import paged_query,MAX_PAGE
+    cursors=cursors or {}
     if not keyword.strip() or len(keyword)>100 or not sites or any(s not in SITES for s in sites):
         raise ValueError("invalid search request")
-    statuses={}
-    def event(e):
-        if e.kind in ("completed","failed"):
-            statuses[e.site]={"state":e.kind,"count":e.result_count,"message":e.message}
-            if "CZBOOKS_CHALLENGE" in e.message:
-                statuses[e.site]["state"]="blocked"
-    results=[]
-    async for chunk in search_stream(keyword,sites=sites,per_site_limit=15,timeout=12,on_event=event):
-        for row in chunk:
-            try:
-                site,bid=resolve(row["book_url"])
-                if site!=row["site"]:continue
-            except ValueError:continue
-            results.append({k:row[k] for k in ("site","title","author","book_url","book_id")})
-    for site in sites:
-        statuses.setdefault(site,{"state":"unknown","count":None,"message":"No completion event"})
-    return {"results":results,"statuses":statuses,
-            "manual_search":{"sk_czbooks":"https://czbooks.net/s/"+quote(keyword,safe="")} if "sk_czbooks" in sites else {}}
+    if any(s not in sites or type(n) is not int or not 1<=n<=MAX_PAGE for s,n in cursors.items()):
+        raise ValueError("invalid search page")
+    return await paged_query(keyword,list(dict.fromkeys(sites)),cursors,resolve)
 
 class Progress:
     async def on_start(self,book):pass
@@ -77,11 +64,11 @@ async def download(url,output,cache):
 def main():
     p=argparse.ArgumentParser();p.add_argument("--build",default=str(ROOT/"build"))
     sub=p.add_subparsers(dest="command",required=True)
-    s=sub.add_parser("search");s.add_argument("keyword");s.add_argument("--sites",nargs="+",choices=list(SITES),required=True)
+    s=sub.add_parser("search");s.add_argument("keyword");s.add_argument("--sites",nargs="+",choices=list(SITES),required=True);s.add_argument("--cursors",default="{}")
     d=sub.add_parser("download");d.add_argument("url");d.add_argument("--output-dir",required=True);d.add_argument("--cache-dir",required=True)
     a=p.parse_args()
     register_sources(a.build)
-    if a.command=="search":print(json.dumps(asyncio.run(query(a.keyword,a.sites)),ensure_ascii=False));return 0
+    if a.command=="search":print(json.dumps(asyncio.run(query(a.keyword,a.sites,json.loads(a.cursors))),ensure_ascii=False));return 0
     return asyncio.run(download(a.url,a.output_dir,a.cache_dir))
 if __name__=="__main__":
     try:raise SystemExit(main())

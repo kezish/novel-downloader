@@ -23,3 +23,13 @@ no complete live book was downloaded.
 Full synthetic books for Biquge5 (including directory and chapter pagination),
 CZBooks and 52 passed through the real client, SQLite and TXT exporter.
 Strict pagination rejects failed follow-up requests and repeated bodies.
+
+## Search pagination follow-up
+Observed 52 and Biquge5 search pages with 20 rows and p=N links; CZBooks
+search pages with 42 rows and /s/<keyword>/<page> links in .paginate.
+Search now uses native registered parsers without a per-page result cap, a
+bounded three-page batch per source, per-site continuation and explicit errors.
+Observed keyword 重生: 52 60 results per batch, continuation 4 then 7;
+CZBooks 126 results from three pages, continuation 4. Biquge5 returned 40
+results before HTTP 500 on page 3; the continuation retains page 3 for retry.
+Challenge responses are reported, not bypassed.
