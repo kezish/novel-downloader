@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>更新日志 · 书音 BookTone</title>
+<meta name="description" content="书音 BookTone 更新日志：最近六个版本的用户可见变化，涵盖桌面与 Android 下载、API 缓存与 gzip 压缩、规则引擎健壮性、安全加固与发布工具改进，每个版本附 GitHub Release 链接。">
+<meta name="keywords" content="书音,BookTone,更新日志,版本历史,Release,小说下载,桌面端,Android">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f7f9fc" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)">
+<script>
+/* Same pre-paint theme choice as index.html: no white flash for a reader who
+   already picked dark mode.  Content is fully visible without this script. */
+(function () {
+  var root = document.documentElement;
+  try {
+    var saved = localStorage.getItem("noveldl-theme");
+    if (saved === "dark" || saved === "light") {
+      root.dataset.theme = saved;
+    } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+      root.dataset.theme = "dark";
+    }
+  } catch (e) { /* storage blocked: keep the light default */ }
+})();
+</script>
+<link rel="canonical" href="http://43.165.170.43/noveldl/changelog.html">
+<link rel="alternate" hreflang="zh-CN" href="http://43.165.170.43/noveldl/changelog.html">
+<link rel="alternate" hreflang="en" href="http://43.165.170.43/noveldl/changelog.html?lang=en">
+<link rel="alternate" hreflang="x-default" href="http://43.165.170.43/noveldl/changelog.html">
+<meta property="og:title" content="更新日志 · 书音 BookTone">
+<meta property="og:description" content="最近六个版本的用户可见变化：桌面与 Android 下载、API 缓存与压缩、规则引擎健壮性、安全加固与发布工具。">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="书音 BookTone">
+<meta property="og:url" content="http://43.165.170.43/noveldl/changelog.html">
+<meta property="og:image" content="http://43.165.170.43/noveldl/og-image.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="书音 BookTone — 84 个下载站点 · 59 个搜索源 · 28 个音乐平台 · 四端同源">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:locale:alternate" content="en_US">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="更新日志 · 书音 BookTone">
+<meta name="twitter:description" content="最近六个版本的用户可见变化：桌面与 Android 下载、API 缓存与压缩、规则引擎健壮性、安全加固与发布工具。">
+<meta name="twitter:image" content="http://43.165.170.43/noveldl/og-image.png">
+<meta name="twitter:image:alt" content="书音 BookTone — 84 个下载站点 · 59 个搜索源 · 28 个音乐平台 · 四端同源">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<noscript>
+<style>
+  /* The language toggle needs JS; without it the page stays in Chinese. */
+  #lang-btn { display: none; }
+</style>
+</noscript>
+<style>
+  /* The changelog layout only: colours, nav, buttons, cards and the footer
+     come from style.css, so this page follows the same tokens and dark mode. */
+  .cl-hero {
+    padding: 72px 0 44px; text-align: center;
+    background:
+      radial-gradient(760px 400px at 82% -20%, var(--accent-soft) 0%, transparent 62%),
+      radial-gradient(560px 320px at -8% 20%, var(--accent-soft) 0%, transparent 58%),
+      var(--bg);
+  }
+  .cl-eyebrow {
+    display: inline-block; margin-bottom: 14px;
+    font-size: 12.5px; font-weight: 700; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--accent-ink);
+    background: var(--accent-soft); border: 1px solid var(--accent-soft-2);
+    border-radius: 99px; padding: 5px 12px;
+  }
+  .cl-hero h1 {
+    font-size: clamp(30px, 5vw, 44px); line-height: 1.15;
+    letter-spacing: -.02em; font-weight: 800;
+  }
+  .cl-lead { max-width: 660px; margin: 16px auto 0; color: var(--text-2); }
+  .cl-actions {
+    display: flex; flex-wrap: wrap; gap: 12px;
+    justify-content: center; margin-top: 28px;
+  }
+  .cl-section { padding-top: 40px; }
+  .cl-list { display: grid; gap: 18px; }
+  .cl-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; }
+  .cl-head h3 {
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 18px; font-weight: 800; letter-spacing: 0; color: var(--accent-ink);
+  }
+  .cl-date { font-size: 13px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+  .cl-summary { margin-top: 8px; }
+  .cl-points { margin: 12px 0 0; padding-left: 20px; display: grid; gap: 6px; }
+  .cl-points li { font-size: 14.5px; color: var(--text-2); }
+  .cl-link {
+    display: inline-block; margin-top: 16px;
+    font-size: 14.5px; font-weight: 600; color: var(--accent-ink);
+  }
+  .cl-link:hover { text-decoration: underline; }
+  /* five footer links do not fit one phone row; let them wrap like the 404's */
+  .foot-links { flex-wrap: wrap; row-gap: 6px; }
+  /* style.css hides the header links below 760px for the burger menu; this
+     page is JavaScript-light and has no burger, so keep them visible. */
+  @media (max-width: 760px) {
+    .nav-inner { gap: 12px; }
+    .nav-links { display: flex; gap: 12px; font-size: 13px; }
+    .nav-links a, .nav-links a:not(:last-child) { display: inline; }
+  }
+  @media (max-width: 560px) {
+    .cl-hero { padding: 56px 0 32px; }
+    /* no burger menu on this page: wrap the nav links onto their own row so
+       the English labels and the language button both fit a phone */
+    .nav-inner {
+      flex-wrap: wrap; height: auto;
+      padding: 8px 16px 10px; gap: 8px 12px;
+    }
+    .nav-links {
+      order: 3; width: 100%; margin-left: 0;
+      flex-wrap: wrap; justify-content: center;
+      gap: 14px; row-gap: 4px; font-size: 13px;
+    }
+    .nav-actions { margin-left: auto; }
+  }
+  @media (max-width: 420px) {
+    .nav-inner { padding: 8px 12px 10px; }
+    .brand-name small { display: none; }
+    .nav-links { gap: 10px; font-size: 12.5px; }
+  }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main" data-en="Skip to main content">跳到主要内容</a>
+
+<header class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="/noveldl/">
+      <span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></svg></span>
+      <span class="brand-name">书音<small>BookTone</small></span>
+    </a>
+    <nav class="nav-links" aria-label="站内导航 / Site navigation">
+      <a href="/noveldl/" data-en="Home">首页</a>
+      <a href="/noveldl/#download" data-en="Download">下载</a>
+      <a href="changelog.html" aria-current="page" data-en="Changelog">更新日志</a>
+      <a href="https://github.com/lingyi-ling/novel-downloader" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+    <div class="nav-actions">
+      <button class="lang-btn" id="lang-btn" type="button" aria-label="切换到英文">EN</button>
+    </div>
+  </div>
+</header>
+
+<main id="main" tabindex="-1">
+  <section class="cl-hero">
+    <div class="section-inner">
+      <p class="cl-eyebrow" data-en="Release history">版本历史</p>
+      <h1 data-en="Changelog">更新日志</h1>
+      <p class="cl-lead" data-en="The last six releases and what changed for you: download behaviour on desktop and Android, API caching and compression, rule-engine robustness, hardening and release tooling. Each entry links to its GitHub release; the full history lives in CHANGELOG.md.">这里汇总最近六个版本的用户可见变化：桌面与 Android 的下载体验、API 的缓存与压缩、规则引擎的健壮性、安全加固与发布工具。每个版本都附有 GitHub Release 链接，完整历史见仓库根目录的 CHANGELOG.md。</p>
+      <div class="cl-actions">
+        <a class="btn btn-primary" href="https://github.com/lingyi-ling/novel-downloader/releases" target="_blank" rel="noopener" data-en="All releases on GitHub">在 GitHub 查看全部版本</a>
+        <a class="btn btn-ghost" href="/noveldl/#download" data-en="Download">下载</a>
+        <a class="btn btn-ghost" href="/noveldl/" data-en="Back to home">返回首页</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section cl-section" aria-labelledby="releases-heading">
+    <div class="section-inner">
+      <h2 class="section-title" id="releases-heading" data-en="Recent releases">最近版本</h2>
+      <p class="section-sub" data-en="Newest first; every version links to its GitHub release.">最新在前，每个版本都链接到对应的 GitHub Release。</p>
+      <div class="cl-list">
+
+        <article class="card cl-entry">
+          <div class="cl-head">
+            <h3>v1.42.0</h3>
+            <p class="cl-date"><time datetime="2026-11-25">2026-11-25</time></p>
+          </div>
+          <p class="cl-summary" data-en="Cancellable desktop updates, a shared embedded cache policy and rule-fuzzing fixes.">桌面取消更新下载、embedded 缓存策略与规则模糊测试修复。</p>
+          <ul class="cl-points">
+            <li data-en="Desktop update bar gains Cancel; cancellation works mid-chunk and during backoff, and the downloaded .part file is kept for resuming.">桌面更新条新增「取消」，分块与退避阶段都能中断，已下载的 .part 保留供续传。</li>
+            <li data-en="When completion races a cancel, completion wins; cancel_update_download waits boundedly and publishes a cancelled state.">完成与取消竞态时完成优先；cancel_update_download 有界等待并发布 cancelled 状态。</li>
+            <li data-en="REST and embedded share one cache policy: reference endpoints are private, max-age=60, other successes and all errors are no-store, and 304 reuses the matching directives.">REST 与 embedded 共用同一缓存策略：参考端点 private, max-age=60，其余成功响应与全部错误 no-store，304 沿用对应指令。</li>
+            <li data-en="The rule engine maps bare exceptions exposed by fuzzing (lone surrogates, bad encodings, scalar results, deep lists) to RuleError or safe values.">规则引擎把模糊测试暴露的裸异常（孤立代理对、非法编码、标量结果、深层列表）统一归为 RuleError 或安全值。</li>
+            <li data-en="Test isolation: background update checks no longer start real download threads that pollute later cases.">测试隔离：桌面后台更新检查不再启动真实下载线程污染后续用例。</li>
+          </ul>
+          <a class="cl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.42.0" target="_blank" rel="noopener" data-en="View v1.42.0 on GitHub →">在 GitHub 查看 v1.42.0 →</a>
+        </article>
+
+        <article class="card cl-entry">
+          <div class="cl-head">
+            <h3>v1.41.1</h3>
+            <p class="cl-date"><time datetime="2026-11-25">2026-11-25</time></p>
+          </div>
+          <p class="cl-summary" data-en="Disk-failure cleanup, a bounded API pool and Android SAF revocation handling.">磁盘失败清理、API 阻塞池与 Android SAF 授权撤销。</p>
+          <ul class="cl-points">
+            <li data-en="On a full or read-only disk, a failed atomic write now removes the read-only .tmp file that used to linger on Windows; playlist writes fsync.">磁盘满或只读时，原子写失败后会清理只读的 .tmp（此前在 Windows 上永久残留）；歌单写入补 fsync。</li>
+            <li data-en="Music search, download and jobs use a dedicated bounded 8-thread pool, so repeated timeouts no longer leak OS threads.">音乐搜索、下载与任务改用专用 8 线程有界池，连续超时或断开不再无限新建 OS 线程。</li>
+            <li data-en="Queued calls that time out are cancelled before they start, while keeping the request ID in contextvars.">排队中的超时调用在开始前取消，同时保留 contextvars 中的请求 ID。</li>
+            <li data-en="Android SAF: revocation, document deletion and ENOSPC during write or close are classified correctly and partial files removed; a failing close is no longer reported as a network error.">Android SAF：写入与 close 阶段的授权撤销、文档删除和 ENOSPC 正确分类并删除半成品，close 失败不再误报为网络错误。</li>
+            <li data-en="Invalid directories are recreated automatically, and a cancelled download no longer shows a ghost 100% progress.">失效目录自动重建；取消后不再出现幽灵 100% 进度。</li>
+          </ul>
+          <a class="cl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.41.1" target="_blank" rel="noopener" data-en="View v1.41.1 on GitHub →">在 GitHub 查看 v1.41.1 →</a>
+        </article>
+
+        <article class="card cl-entry">
+          <div class="cl-head">
+            <h3>v1.41.0</h3>
+            <p class="cl-date"><time datetime="2026-11-25">2026-11-25</time></p>
+          </div>
+          <p class="cl-summary" data-en="API gzip compression, desktop recent searches and sturdier CLI tables.">API gzip 压缩、桌面最近搜索与 CLI 表格健壮性。</p>
+          <ul class="cl-points">
+            <li data-en="API responses are gzipped when the client allows it and the body is at least 1 KiB; SSE, downloads, 304 and HEAD are never compressed.">/api/v1 JSON 响应在客户端允许且不小于 1 KiB 时 gzip 压缩；SSE、下载、304 与 HEAD 不压缩。</li>
+            <li data-en="Every response carries Vary: Accept-Encoding; ETags are computed over the uncompressed bytes, so gzip and identity share one ETag.">所有响应带 Vary: Accept-Encoding；ETag 基于未压缩字节，gzip 与 identity 共用同一 ETag。</li>
+            <li data-en="The desktop search box shows the 10 most recent searches as chips, deduplicated and most-recent first; clicking one re-runs it under current filters, and there is a clear action.">桌面搜索框下显示最近 10 条搜索 chips，去重置顶，点击可按当前条件重搜，并提供清空入口。</li>
+            <li data-en="Recent searches live in search_history inside desktop_prefs.json and are excluded from settings export.">最近搜索保存在 desktop_prefs.json 的 search_history，不参与设置导出。</li>
+            <li data-en="CLI tables no longer collapse to nothing at a tiny COLUMNS, and ANSI/OSC sequences are stripped before width calculation.">CLI 表格在 COLUMNS 极小时不再产生空表，单元格内的 ANSI/OSC 序列在排版前剥离。</li>
+            <li data-en="Rendering of the recent-search chips is on the XSS sink list and escapes through one template helper.">最近搜索 chips 的渲染纳入 XSS sink 清单，模板统一转义。</li>
+          </ul>
+          <a class="cl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.41.0" target="_blank" rel="noopener" data-en="View v1.41.0 on GitHub →">在 GitHub 查看 v1.41.0 →</a>
+        </article>
+
+        <article class="card cl-entry">
+          <div class="cl-head">
+            <h3>v1.40.0</h3>
+            <p class="cl-date"><time datetime="2026-11-24">2026-11-24</time></p>
+          </div>
+          <p class="cl-summary" data-en="Android engine fault tolerance, follow JSON output and sturdier config and rules.">Android 引擎容错、follow JSON 与配置/规则健壮性。</p>
+          <ul class="cl-points">
+            <li data-en="New follow check --json prints a single-line object (ok, checked, changed, failed, invalid, books); --wait and --json are mutually exclusive.">新增 follow check --json，输出单行对象（ok/checked/changed/failed/invalid/books），--wait 与 --json 互斥。</li>
+            <li data-en="The Android engine has a start state machine (STARTING, READY, FAILED, STOPPED plus generation), port fallback across 8081 to 8084 and a 15-second health probe.">Android 引擎启动状态机（STARTING/READY/FAILED/STOPPED + generation），8081 到 8084 端口回退与 15 秒健康探测。</li>
+            <li data-en="Desktop auto-download is idempotent: concurrent or repeated events download once, and an already-downloaded file is re-verified before reuse.">桌面自动下载幂等：并发或重复事件只下载一次，已下载文件复用前复验。</li>
+            <li data-en="Out-of-range integers and invalid paths in config no longer raise bare OverflowError or ValueError; they become path-aware config errors.">配置中的超大整数与非法路径不再抛裸 OverflowError / ValueError，统一为带路径的配置问题。</li>
+            <li data-en="Rule JSON parses chained subscripts such as a[0][1] correctly, and deep nesting or cycles become RuleError.">规则 JSON 正确解析链式下标 a[0][1]，深层嵌套与循环引用转为 RuleError。</li>
+          </ul>
+          <a class="cl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.40.0" target="_blank" rel="noopener" data-en="View v1.40.0 on GitHub →">在 GitHub 查看 v1.40.0 →</a>
+        </article>
+
+        <article class="card cl-entry">
+          <div class="cl-head">
+            <h3>v1.39.0</h3>
+            <p class="cl-date"><time datetime="2026-11-22">2026-11-22</time></p>
+          </div>
+          <p class="cl-summary" data-en="Desktop window reset, better OpenAPI docs and sharper secret-scan and download classification.">桌面窗口重置、OpenAPI 文档质量与扫描/下载分类强化。</p>
+          <ul class="cl-points">
+            <li data-en="Desktop settings gain Reset window position and size; it deletes only the five window_* preferences, leaves the current window in place and takes effect on the next launch.">桌面设置页新增「重置窗口位置与大小」，只删五个 window_* 偏好，当前窗口不移动、下次启动生效。</li>
+            <li data-en="OpenAPI now documents servers, request and response examples for key endpoints, an empty-body 304 example and the 400/413/415/500/503/504 responses.">OpenAPI 补齐 servers、关键端点请求/响应示例、304 空体示例与 400/413/415/500/503/504 响应声明。</li>
+            <li data-en="Secret scanning adds URL userinfo, Slack/Discord webhook and JWT rules, and treats unquoted config values as data.">密钥扫描新增 URL userinfo、Slack/Discord webhook 与 JWT 规则，未加引号的配置值按数据处理。</li>
+            <li data-en="Android download failures now cover ERROR_DEVICE_NOT_FOUND and every COLUMN_REASON classification.">Android 下载失败补齐 ERROR_DEVICE_NOT_FOUND 文案与全部 COLUMN_REASON 分类。</li>
+            <li data-en="A provider SecurityException is treated as a permission issue and falls back to system Downloads; HTTP status travels in DownloadHttpException.">provider 的 SecurityException 归为权限问题并回退系统 Downloads；HTTP 状态由 DownloadHttpException 携带。</li>
+          </ul>
+          <a class="cl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.39.0" target="_blank" rel="noopener" data-en="View v1.39.0 on GitHub →">在 GitHub 查看 v1.39.0 →</a>
+        </article>
+
+        <article class="card cl-entry">
+          <div class="cl-head">
+            <h3>v1.38.1</h3>
+            <p class="cl-date"><time datetime="2026-11-22">2026-11-22</time></p>
+          </div>
+          <p class="cl-summary" data-en="Patch release: credential redaction, retries and diagnostics contracts.">补丁版：凭据脱敏、重试与诊断契约。</p>
+          <ul class="cl-points">
+            <li data-en="Music health, search and download now redact MUSIC_U, Bearer tokens and signed query strings in error text, http_headers and logs.">音乐 health/search/download 的错误文本、http_headers 与日志统一脱敏 MUSIC_U、Bearer 与签名 query。</li>
+            <li data-en="doctor now also redacts prefixed credential keys such as proxy_password, client_secret and auth_token.">doctor 现在同样脱敏 proxy_password、client_secret、auth_token 等带前缀的凭据键。</li>
+            <li data-en="Rule fetching classifies timeouts as RuleError while keeping TransportError semantics; extra-page timeouts and redirects are no longer swallowed.">规则抓取把超时归类为 RuleError 并保留 TransportError 语义，额外页超时与重定向不再被静默吞掉。</li>
+            <li data-en="The Android API client retries 5xx and 429 responses bounded by Retry-After (max 10 s); only GET and HEAD retry network errors.">Android API 客户端对 5xx/429 有界重试并支持 Retry-After（上限 10 秒），仅 GET/HEAD 重试网络异常。</li>
+            <li data-en="Release tooling queries tags over REST when git ls-remote is unreachable, and retries truncated responses as network errors.">发布工具在 git ls-remote 不可达时经 REST 查询 tag，截断响应按网络错误重试。</li>
+          </ul>
+          <a class="cl-link" href="https://github.com/lingyi-ling/novel-downloader/releases/tag/v1.38.1" target="_blank" rel="noopener" data-en="View v1.38.1 on GitHub →">在 GitHub 查看 v1.38.1 →</a>
+        </article>
+
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div class="foot-brand">
+      <span class="brand-mark small"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></svg></span>
+      <span>书音 BookTone</span>
+    </div>
+    <nav class="foot-links" aria-label="页脚链接 / Footer links">
+      <a href="/noveldl/" data-en="Home">首页</a>
+      <a href="/noveldl/#download" data-en="Download">下载</a>
+      <a href="https://github.com/lingyi-ling/novel-downloader/tree/main/docs" target="_blank" rel="noopener" data-en="Docs">文档</a>
+      <a href="https://github.com/lingyi-ling/novel-downloader/blob/main/CHANGELOG.md" target="_blank" rel="noopener" data-en="Full changelog">完整更新日志</a>
+      <a href="https://github.com/lingyi-ling/novel-downloader" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+    <p class="foot-note">
+      <span data-en="This page is generated by hand from CHANGELOG.md at the repository root; the site is plain static HTML / CSS / JS with no backend.">本页按仓库根目录的 CHANGELOG.md 手工整理；本站是纯静态页面（HTML / CSS / JS，无后端）。</span>
+    </p>
+    <p class="foot-legal">© 2026 书音 BookTone contributors · Apache-2.0</p>
+  </div>
+</footer>
+
+<script>
+/* Changelog page language switch: the same data-en swap the home page uses,
+   with this page's own title and description so the two documents cannot
+   overwrite each other's metadata. */
+(function () {
+  var TITLE = { zh: "更新日志 · 书音 BookTone", en: "Changelog · BookTone" };
+  var DESC = {
+    zh: "书音 BookTone 更新日志：最近六个版本的用户可见变化，涵盖桌面与 Android 下载、API 缓存与 gzip 压缩、规则引擎健壮性、安全加固与发布工具改进，每个版本附 GitHub Release 链接。",
+    en: "BookTone changelog: the last six releases — desktop and Android downloads, API caching and gzip, rule-engine robustness, hardening and tooling fixes."
+  };
+  var btn = document.getElementById("lang-btn");
+  var nodes = document.querySelectorAll("[data-en]");
+  var meta = document.querySelector('meta[name="description"]');
+  function saved() {
+    try { return localStorage.getItem("noveldl-lang"); } catch (e) { return null; }
+  }
+  function persist(lang) {
+    try { localStorage.setItem("noveldl-lang", lang); } catch (e) { /* private mode */ }
+  }
+  var lang = saved() === "en" ? "en" : "zh";
+  // ?lang= is the hreflang deep link; it wins once, then the toggle owns it.
+  try {
+    var q = new URLSearchParams(window.location.search).get("lang");
+    if (q === "en" || q === "zh") { persist(q); lang = q; }
+  } catch (e) { /* file:// or no URLSearchParams */ }
+  function apply(next) {
+    lang = next;
+    var en = next === "en";
+    document.documentElement.lang = en ? "en" : "zh-CN";
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (el.getAttribute("data-zh") === null) el.setAttribute("data-zh", el.innerHTML);
+      el.innerHTML = en ? el.getAttribute("data-en") : el.getAttribute("data-zh");
+    }
+    document.title = en ? TITLE.en : TITLE.zh;
+    if (meta) meta.setAttribute("content", en ? DESC.en : DESC.zh);
+    if (btn) {
+      btn.textContent = en ? "中文" : "EN";
+      btn.setAttribute("aria-label", en ? "Switch to Chinese" : "切换到英文");
+    }
+  }
+  apply(lang);
+  if (btn) {
+    btn.addEventListener("click", function () {
+      var next = lang === "en" ? "zh" : "en";
+      persist(next);
+      try {
+        var url = new URL(window.location.href);
+        if (url.searchParams.has("lang")) {
+          url.searchParams.delete("lang");
+          window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+        }
+      } catch (e) { /* blocked history API */ }
+      apply(next);
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

@@ -97,6 +97,7 @@ OpenAPI 文档（`/openapi.json`，也是 `/docs` 的数据源）同样声明了
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/v1/health` | 存活检查与只读诊断，返回 `{status, version, uptime_s, ...}`（见「健康检查」）。 |
+| `GET` | `/api/v1/metrics` | 进程内只读运行计数：请求数、状态分类、方法、拒绝次数、SSE 连接数（见「运行指标」）。 |
 | `GET` | `/api/v1/sites` | 搜索/下载支持的站点，返回 `{search: {...}, download: {...}}`。 |
 | `POST` | `/api/v1/search` | 聚合搜索多个站点。 |
 | `GET` | `/api/v1/search/stream` | 以 SSE 流式返回各站点搜索结果。 |
@@ -170,6 +171,54 @@ Swagger UI（`/docs`）按 `system`、`search`、`browse`、`tasks`、`login`、
 - **`music_platforms_available`**：从惰性注册表统计并缓存到进程结束；缺少音乐依赖或注册表不可用时为 `0`。该探测不会导入具体平台，也不会联网。
 - `GET /api/v1/health` 不受请求限流影响（见「请求频率限制」），适合作为可用性监控。
 - **内嵌引擎仍只是存活探针**：桌面端与 Android 独立模式的内嵌 `/api/v1/health` 仍只返回 `{"status", "version"}`；上述诊断字段仅由 REST 服务提供，客户端不应假定内嵌传输也带这些字段。
+
+## 运行指标（Metrics） {#metrics}
+
+`GET /api/v1/metrics` 返回**当前进程**的只读运行计数，用于本地监控与排障。响应是一个固定形状的 JSON 对象，不含任何高基数标签：**不记录路径、查询串、关键词、客户端 IP 或凭据**，因此扫描未知 URL 既不会让响应变大，也不会让进程内存随客户端输入增长。
+
+```json
+{
+  "version": "1.42.0",
+  "started_at": "2026-11-25T08:00:00Z",
+  "uptime_s": 1234.567,
+  "requests": {
+    "total": 57,
+    "completed": 56,
+    "by_status_class": {"2xx": 50, "3xx": 0, "4xx": 6, "5xx": 0, "other": 0},
+    "by_method": {
+      "GET": 55, "POST": 2, "PUT": 0, "PATCH": 0,
+      "DELETE": 0, "HEAD": 0, "OPTIONS": 0, "other": 0
+    },
+    "rejections": {
+      "rate_limited": 1,
+      "body_too_large": 0,
+      "unsupported_media_type": 0
+    }
+  },
+  "sse": {"active": 1, "peak": 3}
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `version` | string | 服务端版本号。 |
+| `started_at` | string | 进程启动时间（RFC 3339 UTC，`Z` 结尾）；重启后重置。 |
+| `uptime_s` | number | 已运行秒数（3 位小数），基于 `time.monotonic`，系统时钟调整不会让它倒退或跳变。 |
+| `requests.total` | int | 已接收的请求数，**包含本次指标请求本身**以及仍在处理中的请求。 |
+| `requests.completed` | int | 已完整处理的响应数；下方状态分类之和等于它，因此恒有 `completed <= total`。 |
+| `requests.by_status_class` | object | 固定键 `2xx`/`3xx`/`4xx`/`5xx`/`other`；`other` 收集信息类状态码与 2xx–5xx 之外的值。 |
+| `requests.by_method` | object | 固定键 `GET`/`POST`/`PUT`/`PATCH`/`DELETE`/`HEAD`/`OPTIONS`/`other`；任意自定义方法都归入 `other`。 |
+| `requests.rejections.rate_limited` | int | 被滑动窗口限流器直接以 `429` 拒绝的次数（是 `4xx` 的子集）。音乐任务队列满时的 `429` 计入 `4xx`，但不计入这里。 |
+| `requests.rejections.body_too_large` | int | 被请求体大小保护以 `413` 拒绝的次数。 |
+| `requests.rejections.unsupported_media_type` | int | 被请求体保护以 `415` 拒绝的次数（非 JSON `Content-Type` 或非 identity `Content-Encoding`）。 |
+| `sse.active` | int | 当前正在流式传输的 SSE 响应数（`text/event-stream`）。 |
+| `sse.peak` | int | 自启动以来同时存在的 SSE 响应峰值。 |
+
+- **鉴权与缓存**：与其他 `/api/v1` 端点完全一致——配置 token 时必须携带 `Authorization: Bearer <token>` 或 `X-API-Key: <token>`，否则返回 `401`；未配置 token 时沿用默认的「仅本机可访问」策略。响应始终带 `Cache-Control: no-store` 与 `X-Request-ID`。
+- **只读**：读取指标不会重置、轮转或清零任何计数；唯一由本次读取造成的增量就是该请求本身进入 `total`（其响应要等发出后才计入 `completed`）。
+- **进程内、按次运行**：计数不共享、不持久化。重启从零开始；多 worker 部署时每个 worker 各有一套（`novel-api` 固定单进程）。需要跨进程聚合时请由外部监控按实例分别抓取。
+- **限流**：与 `/health` 不同，`/metrics` 不在限流豁免名单中；当本机 IP 已被限流锁定，它会先返回 `429`，窗口滑过后恢复。这样指标端点不会成为绕过限流的旁路。
+- **内嵌引擎不支持**：桌面端与 Android 独立模式的内嵌引擎不提供 `/metrics`，请求返回 `404 {"detail": ...}`。
 
 ## 搜索
 
@@ -1243,12 +1292,17 @@ JSON 响应**不**带 CSP。
 | 路径 | 值 |
 | --- | --- |
 | `/api/v1/sites`、`/api/v1/history`、`/api/v1/music/platforms` | `private, max-age=60` |
-| `/api/v1/tasks*`、`/api/v1/login/requests`、`/api/v1/music/jobs*` 等实时数据 | `no-store` |
+| `/api/v1` 中上述参考端点以外的所有成功响应：`/tasks*`、`/login*`、`/music/jobs*`、`/watchlist*`、`/health` 等 | `no-store` |
 | 任意 `4xx` / `5xx` 错误 | `no-store` |
 | `/downloads/*` | `public, max-age=3600` |
 
 SSE 端点自己设置的 `Cache-Control: no-cache` 不会被覆盖。`/docs`、`/redoc`、
 `/openapi.json` 不在上述前缀内，不加这些头。
+
+这张表由两端共用（`apps/common/cache_policy.py`）：REST 经
+`CacheControlMiddleware` 应用，内嵌引擎在 `_send_json` 中应用同一份规则，
+因此同一路径、同一状态码得到同一个指令（内嵌引擎的唯一差异见下文）。
+依据是路径与状态码，不区分 GET/HEAD；`304` 保留对应 `200` 的指令。
 
 ### 条件请求（ETag / If-None-Match） {#conditional-requests}
 
@@ -1363,15 +1417,21 @@ curl 不发 `Origin`，不受影响。
     内嵌引擎**没有 CORS 层**：它只绑定 `127.0.0.1`、只服务原生客户端，因此
     不发送任何 `Access-Control-*` 头，浏览器也无法跨源读取它的响应。它同样
     带 `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、
-    `X-Request-ID`，以及 `/downloads` 的 sandbox CSP。三个参考端点
-    （`/sites`、`/history`、`/music/platforms`）与 REST 一样带强 `ETag` 与
-    `Cache-Control: private, max-age=60`，匹配的 `If-None-Match` 同样返回
-    `304`；其余 REST 缓存策略（实时数据的 `no-store`、`/downloads` 的
-    `public`）仍未实现（原生客户端不经过 HTTP 缓存）。JSON 响应同样支持
-    gzip：阈值、`Vary: Accept-Encoding`（`304` 也带）和「`ETag` 基于未压缩
-    表示」的规则与 REST 一致，`/downloads` 文件不压缩。内嵌引擎没有 SSE
-    端点，因此不存在 SSE 压缩问题。若将来让浏览器访问
-    内嵌端口，需要先补上 CORS 与这部分策略。
+    `X-Request-ID`，以及 `/downloads` 的 sandbox CSP。缓存策略与 REST 共用
+    同一张表（`apps/common/cache_policy.py`，在 `_send_json` 统一应用）：
+    三个参考端点（`/sites`、`/history`、`/music/platforms`）带强 `ETag` 与
+    `Cache-Control: private, max-age=60`，匹配的 `If-None-Match` 返回 `304`
+    且保留缓存头；`/tasks*`、`/login*`、`/music/jobs*` 与其余 `/api/v1`
+    成功响应为 `no-store`；**所有** `4xx`/`5xx` 为 `no-store`；
+    `/api/v1` 与 `/downloads` 之外的路径不加该头。HEAD 由引擎按 GET 应答
+    （REST 的 `/api/v1` 路由不注册 HEAD，返回带 `no-store` 的 `405`）。
+    唯一保留的差异是**成功的** `/downloads` 文件响应：REST 为
+    `public, max-age=3600`，引擎服务的是应用私有的导出目录，保持历史响应头
+    （不带 `Cache-Control`）；`/downloads` 的错误仍是 `no-store`，与 REST
+    一致。JSON 响应同样支持 gzip：阈值、`Vary: Accept-Encoding`（`304` 也带）
+    和「`ETag` 基于未压缩表示」的规则与 REST 一致，`/downloads` 文件不压缩。
+    内嵌引擎没有 SSE 端点，因此不存在 SSE 压缩问题。若将来让浏览器访问
+    内嵌端口，仍需补上 CORS。
 
 ## 错误码
 

@@ -94,6 +94,15 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_403_FORBIDDEN
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from novel_downloader.apps.common.cache_policy import (
+    CACHE_CONTROL_NO_STORE,
+    CACHE_CONTROL_PRIVATE,
+    CACHE_CONTROL_PUBLIC,
+    CACHE_CONTROL_RULES,
+    CACHE_POLICY_PREFIXES,
+    cache_control_for,
+    governs_path,
+)
 from novel_downloader.apps.common.compression import (
     COMPRESSION_LEVEL,
     COMPRESSION_MIN_BYTES,
@@ -109,6 +118,7 @@ from novel_downloader.apps.common.conditional_get import (
 )
 
 from .auth import AUTH_ERROR_DETAIL, is_authorized
+from .metrics import metrics_from_scope
 
 logger = logging.getLogger(__name__)
 
@@ -171,29 +181,12 @@ _monotonic = time.monotonic
 #: Requests slower than this many seconds are logged at ``WARNING``.
 SLOW_REQUEST_SECONDS = 1.0
 
-#: ``Cache-Control`` for reference data the client may reuse briefly.
-CACHE_CONTROL_PRIVATE = "private, max-age=60"
-
-#: ``Cache-Control`` for exported files: written once and never rewritten.
-CACHE_CONTROL_PUBLIC = "public, max-age=3600"
-
-#: ``Cache-Control`` for live data and for every error response.
-CACHE_CONTROL_NO_STORE = "no-store"
-
-#: ``path prefix`` -> ``Cache-Control`` for successful responses. Matching is
-#: boundary-aware: ``/api/v1/tasks`` also covers ``/api/v1/tasks/{task_id}``
-#: and the SSE stream, but not a look-alike such as ``/api/v1/tasks-extra``.
-CACHE_CONTROL_RULES: tuple[tuple[str, str], ...] = (
-    ("/api/v1/sites", CACHE_CONTROL_PRIVATE),
-    ("/api/v1/history", CACHE_CONTROL_PRIVATE),
-    ("/api/v1/music/platforms", CACHE_CONTROL_PRIVATE),
-    ("/api/v1/tasks", CACHE_CONTROL_NO_STORE),
-    (DOWNLOADS_PREFIX, CACHE_CONTROL_PUBLIC),
-)
-
-#: Path prefixes the cache policy governs. Requests outside them (``/docs``,
-#: ``/openapi.json``, ...) pass through without any header being added.
-CACHE_POLICY_PREFIXES: tuple[str, ...] = ("/api/v1", DOWNLOADS_PREFIX)
+# The policy table and the resolver live in the stdlib-only shared module
+# ``apps/common/cache_policy.py`` so the embedded engine — which cannot import
+# this FastAPI package — applies the exact same rules. ``CACHE_CONTROL_*``,
+# ``CACHE_CONTROL_RULES`` and ``CACHE_POLICY_PREFIXES`` are imported above and
+# re-exported (see ``__all__``) because this is where the REST header contract
+# is documented and tested.
 
 # ---------------------------------------------------------------------------
 # Security response headers
@@ -367,6 +360,13 @@ def _content_length(scope: Scope) -> int | None:
             except ValueError:
                 return None
     return None
+
+
+def _record_body_rejection(scope: Scope, status: int) -> None:
+    """Count a body-guard refusal when the app carries a metrics registry."""
+    registry = metrics_from_scope(scope)
+    if registry is not None:
+        registry.record_body_rejection(status)
 
 
 def _is_json_content_type(value: str) -> bool:
@@ -565,6 +565,7 @@ class BodySizeLimitMiddleware:
         if any(encoding not in SUPPORTED_CONTENT_ENCODINGS for encoding in encodings):
             # Unsupported compressed body: reject without reading it, so a
             # compression bomb never reaches a decoder. The value is not echoed.
+            _record_body_rejection(scope, 415)
             response = JSONResponse(
                 status_code=415,
                 content={
@@ -584,6 +585,7 @@ class BodySizeLimitMiddleware:
             # before it is read rather than handed to a parser that would
             # reject it anyway. A bodyless request still fails here only when
             # it deliberately declares a non-JSON type.
+            _record_body_rejection(scope, 415)
             response = JSONResponse(
                 status_code=415,
                 content={"detail": UNSUPPORTED_CONTENT_TYPE_DETAIL},
@@ -623,6 +625,7 @@ class BodySizeLimitMiddleware:
 
     async def _reject(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Send a ``413`` error response without reading the offending body."""
+        _record_body_rejection(scope, 413)
         response = JSONResponse(
             status_code=413,
             content={
@@ -877,6 +880,9 @@ class RateLimitMiddleware:
 
         retry_after = self._register_hit(self._client_ip(scope), _monotonic())
         if retry_after is not None:
+            registry = metrics_from_scope(scope)
+            if registry is not None:
+                registry.record_rate_limited()
             response = JSONResponse(
                 status_code=429,
                 content={
@@ -914,42 +920,23 @@ class CacheControlMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
-    @staticmethod
-    def _matches(cleaned: str, prefix: str) -> bool:
-        """Whether ``cleaned`` is ``prefix`` itself or below it."""
-        return cleaned == prefix or cleaned.startswith(prefix + "/")
-
-    def _governs(self, cleaned: str) -> bool:
-        """Whether the policy applies to this path at all."""
-        return any(self._matches(cleaned, prefix) for prefix in CACHE_POLICY_PREFIXES)
-
-    def _rule_for(self, cleaned: str) -> str | None:
-        """Return the configured ``Cache-Control`` for the path, if any."""
-        for prefix, value in CACHE_CONTROL_RULES:
-            if self._matches(cleaned, prefix):
-                return value
-        return None
-
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
 
         cleaned = routed_path(scope).rstrip("/") or "/"
-        if not self._governs(cleaned):
+        if not governs_path(cleaned):
             await self.app(scope, receive, send)
             return
-
-        rule = self._rule_for(cleaned)
 
         async def send_with_cache(message: Message) -> None:
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
                 if "cache-control" not in headers:
-                    if message["status"] >= 400 or rule is None:
-                        headers["cache-control"] = CACHE_CONTROL_NO_STORE
-                    else:
-                        headers["cache-control"] = rule
+                    value = cache_control_for(cleaned, int(message["status"]))
+                    if value is not None:
+                        headers["cache-control"] = value
             await send(message)
 
         await self.app(scope, receive, send_with_cache)

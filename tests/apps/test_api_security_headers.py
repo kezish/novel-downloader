@@ -43,8 +43,9 @@ The embedded engine (``apps/embedded/server.py``) deliberately has **no CORS
 layer** (it is loopback-only and speaks to native clients), so these tests
 assert the absence of ``Access-Control-*`` there and pin the headers it does
 share with REST (``nosniff``/``no-referrer``/``X-Request-ID``, the downloads
-CSP). Its lack of the REST ``Cache-Control`` policy is recorded, not
-"fixed": the engine answers native clients, not browsers.
+CSP, and the ``Cache-Control`` table from ``apps/common/cache_policy.py``).
+Its per-path/status cache parity is covered in
+``test_embedded_cache_control.py``.
 
 Everything is offline: REST requests go through ``httpx.ASGITransport``; the
 embedded checks use a loopback listener the test starts itself.
@@ -811,19 +812,26 @@ def test_embedded_download_is_sandboxed_and_not_json(embedded: int) -> None:
     assert headers["x-content-type-options"] == "nosniff"
 
 
-def test_embedded_engine_has_no_rest_cache_policy(embedded: int) -> None:
-    """
-    Recorded difference: the embedded engine sends no ``Cache-Control``.
+def test_embedded_engine_applies_the_rest_cache_policy(embedded: int) -> None:
+    """The embedded engine stamps the same ``Cache-Control`` table as REST.
 
-    The REST policy (``no-store`` for task/credential state) protects a
-    browser-reachable HTTP surface. The embedded engine serves native clients
-    over loopback and deliberately keeps the stdlib-only stack; adding a cache
-    policy there would be a behaviour change, not a parity fix. If a browser
-    is ever pointed at the embedded port, this test is the marker to revisit.
+    Only the three reference endpoints used to carry a directive. The policy
+    now lives in ``apps/common/cache_policy.py`` and is applied centrally in
+    the engine's ``_send_json``, so live state and errors are ``no-store``
+    there too. Per-path parity (including 304/HEAD and the one remaining
+    difference — a successful ``/downloads`` file) is covered by
+    ``tests/apps/test_embedded_cache_control.py``.
     """
-    for path in ("/api/v1/health", "/api/v1/tasks", "/api/v1/does-not-exist"):
+    expected = {
+        "/api/v1/sites": CACHE_CONTROL_PRIVATE,
+        "/api/v1/history": CACHE_CONTROL_PRIVATE,
+        "/api/v1/health": CACHE_CONTROL_NO_STORE,
+        "/api/v1/tasks": CACHE_CONTROL_NO_STORE,
+        "/api/v1/does-not-exist": CACHE_CONTROL_NO_STORE,
+    }
+    for path, value in expected.items():
         _, _, headers = _embedded_request(embedded, "GET", path)
-        assert "cache-control" not in headers, path
+        assert headers.get("cache-control") == value, path
 
 
 def test_embedded_engine_never_enables_credentials(embedded: int) -> None:

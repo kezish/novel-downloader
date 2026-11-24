@@ -111,6 +111,17 @@ def test_the_404_page_is_published() -> None:
     assert (_SCRIPT.parent.parent / "website" / "404.html").is_file()
 
 
+def test_the_changelog_page_is_published() -> None:
+    """The release history is a real page, not a GitHub-only link."""
+    website = _SCRIPT.parent.parent / "website"
+    assert "changelog.html" in deploy_site.SITE_FILES
+    assert (website / "changelog.html").is_file()
+    # declared after the home page, so the published order stays sensible
+    assert deploy_site.SITE_FILES.index("index.html") < deploy_site.SITE_FILES.index(
+        "changelog.html"
+    )
+
+
 def test_both_sitemaps_are_published() -> None:
     """An unpublishable sitemap is invisible to crawlers, so list both."""
     website = _SCRIPT.parent.parent / "website"

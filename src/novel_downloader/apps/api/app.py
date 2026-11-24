@@ -78,6 +78,11 @@ Additional hardening
   (:class:`novel_downloader.apps.api.middleware.SecurityHeadersMiddleware`).
 * ``/docs``, ``/redoc`` and ``/openapi.json`` can be switched off
   (``expose_docs=False``); the CLI does so automatically on a non-local bind.
+* ``GET /api/v1/metrics`` exposes fixed-shape, label-free counters for this
+  process (requests, status classes, methods, the limiter/body-guard
+  rejections and active/peak SSE streams) and is protected by the same token
+  as every other ``/api/v1`` route
+  (:class:`novel_downloader.apps.api.metrics.MetricsMiddleware`).
 * Every error response is shaped as ``{"detail": ...}`` and unexpected
   exceptions are turned into a stack-trace-free ``500``.
 
@@ -110,6 +115,7 @@ from novel_downloader.apps.core.task_manager import manager
 from novel_downloader.infra.config import get_config_value
 
 from .auth import require_token
+from .metrics import MetricsMiddleware, MetricsRegistry
 from .middleware import (
     BODY_LIMIT_METHODS,
     DEFAULT_MAX_BODY_BYTES,
@@ -930,6 +936,10 @@ def create_app(
     )
     application.state.api_token = resolved_token or None
     application.state.api_timeouts = dict(timeouts or {})
+    #: Counters behind ``GET /api/v1/metrics``. One registry per application
+    #: (normally one process); the metrics middleware and the guards below
+    #: resolve it through ``scope["app"].state`` and the route reads it here.
+    application.state.metrics = MetricsRegistry()
     #: Read by the catch-all 500 handler, which runs above the CORS layer.
     application.state.cors_enabled = bool(cors)
     application.state.webhook_url = resolved_webhook or None
@@ -1029,6 +1039,15 @@ def create_app(
     # CORSMiddleware generates itself. The 500 produced by Starlette's error
     # layer sits above even this and is stamped by the error handler instead.
     application.add_middleware(RequestIdMiddleware)
+
+    # Metrics sit above every layer that can answer by itself — the rate
+    # limiter's 429, the body guard's 413/415, the origin gate's 403, the
+    # token checks — so those responses are counted in the totals and status
+    # classes instead of being invisible. The SSE gauge is driven from the
+    # response head in this layer. The registry is the exact object put on
+    # ``app.state.metrics``; the guards read it from the scope for their
+    # rejection counters.
+    application.add_middleware(MetricsMiddleware, metrics=application.state.metrics)
 
     downloads = _resolve_output_dir(output_dir)
     # Serving will simply return 404s if the directory cannot be created; do

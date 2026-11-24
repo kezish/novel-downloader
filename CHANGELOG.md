@@ -1,3 +1,23 @@
+## v1.42.0 (2026-11-25)
+
+桌面取消下载、embedded 缓存策略与规则模糊修复。
+
+### Feature
+
+- **桌面取消更新下载**：更新条新增「取消」；`download_asset` 支持 `should_cancel`（分块/退避检查），取消保留 `.part` 供续传；完成与取消竞态时完成优先；桥方法 `cancel_update_download` 有界等待并发布 `cancelled` 状态
+- **embedded 缓存策略**：REST 与 embedded 共用 `apps/common/cache_policy.py`；参考端点 `private, max-age=60`，其余 `/api/v1` 成功响应与所有错误 `no-store`，304 沿用对应指令；仅成功 `/downloads` 仍保留差异
+
+### Fix
+
+- **规则引擎**：模糊测试暴露的裸异常——孤立代理对/非法编码 `XMLSyntaxError`/`ValueError`、XPath 标量结果 `TypeError`、标量节点 `AttributeError`、深层列表 `RecursionError`，全部归为 `RuleError` 或安全值
+- **测试隔离**：桌面后台更新检查不再启动真实下载线程污染后续用例
+
+### Test
+
+- Python **16166 passed / 64 skipped**；ruff/format、mypy 全绿
+- Android 全量单测与 `lintDebug` 通过
+- 新增 321 例规则模糊测试、40 例 embedded 缓存策略、18 例取消下载
+
 ## v1.41.1 (2026-11-25)
 
 磁盘失败清理、API 阻塞池与 SAF 授权撤销。

@@ -72,6 +72,8 @@ SITE_FILES: tuple[str, ...] = (
     # must point at it with ``error_page 404 /noveldl/404.html;``.  That
     # server config lives outside this repository (see the module docstring).
     "404.html",
+    # Static release history page, linked from the home page and the 404.
+    "changelog.html",
     "main.js",
     "style.css",
     "favicon.svg",

@@ -107,6 +107,7 @@ and `login/requests/stream`). In the examples below `$BASE` is the API root
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/api/v1/health` | Liveness check and read-only diagnostics, returns `{status, version, uptime_s, ...}` (see "Health check"). |
+| `GET` | `/api/v1/metrics` | Process-local read-only runtime counters: requests, status classes, methods, rejections and SSE connections (see "Runtime metrics"). |
 | `GET` | `/api/v1/sites` | Sites supported for search/download, returns `{search: {...}, download: {...}}`. |
 | `POST` | `/api/v1/search` | Aggregate search across multiple sites. |
 | `GET` | `/api/v1/search/stream` | Stream per-site search results with SSE. |
@@ -181,6 +182,58 @@ historical fields for old clients and monitoring:
 - **`music_platforms_available`**: counted from the lazy registry and cached for the process lifetime; it is `0` when music dependencies are missing or the registry is unavailable. The probe imports no concrete platform and makes no network call.
 - `GET /api/v1/health` is exempt from request rate limiting (see "Request rate limiting"), which makes it suitable for availability monitoring.
 - **The embedded engine stays a liveness probe**: `/api/v1/health` on the desktop app and Android standalone embedded transport still returns only `{"status", "version"}`. The diagnostic fields above are REST-server only; clients must not assume the embedded transport carries them.
+
+## Runtime metrics {#metrics}
+
+`GET /api/v1/metrics` returns read-only counters for the **current process**,
+for local monitoring and troubleshooting. The payload has a fixed shape and no
+high-cardinality labels: it **never records a path, query string, keyword,
+client IP or credential**, so probing unknown URLs can neither enlarge the
+response nor grow the process's memory with client input.
+
+```json
+{
+  "version": "1.42.0",
+  "started_at": "2026-11-25T08:00:00Z",
+  "uptime_s": 1234.567,
+  "requests": {
+    "total": 57,
+    "completed": 56,
+    "by_status_class": {"2xx": 50, "3xx": 0, "4xx": 6, "5xx": 0, "other": 0},
+    "by_method": {
+      "GET": 55, "POST": 2, "PUT": 0, "PATCH": 0,
+      "DELETE": 0, "HEAD": 0, "OPTIONS": 0, "other": 0
+    },
+    "rejections": {
+      "rate_limited": 1,
+      "body_too_large": 0,
+      "unsupported_media_type": 0
+    }
+  },
+  "sse": {"active": 1, "peak": 3}
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `version` | string | Server version. |
+| `started_at` | string | Process start time (RFC 3339 UTC, `Z` suffix); reset on restart. |
+| `uptime_s` | number | Seconds since start (3 decimals), measured on `time.monotonic`, so wall-clock changes cannot move it. |
+| `requests.total` | int | Requests received, **including this metrics probe** and any request still in flight. |
+| `requests.completed` | int | Responses fully handled; the status counts below sum to it, so `completed <= total` always holds. |
+| `requests.by_status_class` | object | Fixed keys `2xx`/`3xx`/`4xx`/`5xx`/`other`; `other` collects informational codes and anything outside 2xx–5xx. |
+| `requests.by_method` | object | Fixed keys `GET`/`POST`/`PUT`/`PATCH`/`DELETE`/`HEAD`/`OPTIONS`/`other`; any custom method is folded into `other`. |
+| `requests.rejections.rate_limited` | int | Requests answered directly by the sliding-window limiter with `429` (a subset of the `4xx` class). A `429` from the music job queue counts as `4xx` but not here. |
+| `requests.rejections.body_too_large` | int | Requests refused by the body-size guard with `413`. |
+| `requests.rejections.unsupported_media_type` | int | Requests refused by the body guard with `415` (non-JSON `Content-Type` or non-identity `Content-Encoding`). |
+| `sse.active` | int | Server-Sent-Events responses (`text/event-stream`) streaming right now. |
+| `sse.peak` | int | Highest simultaneous SSE stream count since start. |
+
+- **Auth and caching**: identical to every other `/api/v1` route — with a token configured, send `Authorization: Bearer <token>` or `X-API-Key: <token>` or receive `401`; without a token the default localhost-only policy applies. The response always carries `Cache-Control: no-store` and `X-Request-ID`.
+- **Read-only**: reading never resets, rotates or clears a counter. The only increment caused by a scrape is the probe request itself entering `total` (its response joins `completed` only after it has been sent).
+- **Per process, per run**: counters are neither shared nor persisted. A restart starts at zero; a multi-worker deployment keeps one independent set per worker (`novel-api` always runs a single process). Aggregate across instances by scraping each one.
+- **Rate limiting**: unlike `/health`, `/metrics` is not on the exempt list. While the caller's IP is locked out it answers `429` and recovers once the window drains, so the metrics endpoint cannot become a rate-limit bypass.
+- **Not available in the embedded engine**: the desktop app and Android standalone embedded transport do not serve `/metrics`; the request returns `404 {"detail": ...}`.
 
 ## Search
 
@@ -1419,13 +1472,19 @@ script to drive the local API. JSON responses carry **no** CSP.
 | Path | Value |
 | --- | --- |
 | `/api/v1/sites`, `/api/v1/history`, `/api/v1/music/platforms` | `private, max-age=60` |
-| `/api/v1/tasks*`, `/api/v1/login/requests`, `/api/v1/music/jobs*` and other live data | `no-store` |
+| Every `/api/v1` success other than the reference endpoints above: `/tasks*`, `/login*`, `/music/jobs*`, `/watchlist*`, `/health`, ... | `no-store` |
 | Any `4xx` / `5xx` error | `no-store` |
 | `/downloads/*` | `public, max-age=3600` |
 
 A `Cache-Control` set by an SSE route (`no-cache`) is never overridden.
 `/docs`, `/redoc` and `/openapi.json` are outside those prefixes and receive
 none of these headers.
+
+Both transports share this table (`apps/common/cache_policy.py`): REST applies
+it in `CacheControlMiddleware`, the embedded engine in `_send_json`, so the
+same path and status yield the same directive (the one engine difference is
+noted below). The decision uses the path and status only, not GET/HEAD, and a
+`304` keeps the directive of the `200` it replaces.
 
 ### Conditional requests (ETag / If-None-Match) {#conditional-requests}
 
@@ -1561,18 +1620,25 @@ removed.
     serves native clients, so it sends no `Access-Control-*` header and a
     browser cannot read its responses cross-origin. It does carry
     `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
-    `X-Request-ID`, and the `/downloads` sandbox CSP. Like REST, the three
-    reference endpoints (`/sites`, `/history`, `/music/platforms`) carry a
-    strong `ETag`, `Cache-Control: private, max-age=60`, and answer a
-    matching `If-None-Match` with `304`. The rest of the REST cache policy
-    (live-data `no-store`, `/downloads` `public`) is still not implemented
-    (native clients do not sit behind an HTTP cache). JSON responses are
-    gzipped under the same rules as REST: same 1 KiB threshold,
-    `Vary: Accept-Encoding` on every response (`304` included), and an `ETag`
-    computed from the uncompressed representation. `/downloads` files are
-    never compressed. The embedded engine exposes no SSE endpoint, so the
-    SSE exclusion does not arise there. Pointing a browser at
-    the embedded port would require adding CORS and that policy.
+    `X-Request-ID`, and the `/downloads` sandbox CSP. Its cache policy is the
+    same shared table (`apps/common/cache_policy.py`, applied in
+    `_send_json`): the three reference endpoints (`/sites`, `/history`,
+    `/music/platforms`) carry a strong `ETag` and
+    `Cache-Control: private, max-age=60`, a matching `If-None-Match` returns
+    `304` with the cache headers intact; `/tasks*`, `/login*`, `/music/jobs*`
+    and every other `/api/v1` success are `no-store`; **every** `4xx`/`5xx` is
+    `no-store`; paths outside `/api/v1` and `/downloads` get no directive.
+    The engine answers `HEAD` like `GET` (REST's `/api/v1` routes do not
+    register `HEAD` and answer `405` with `no-store`). One difference remains:
+    a **successful** `/downloads` file is `public, max-age=3600` on REST,
+    while the engine serves its app-private export directory with its
+    historical headers (no `Cache-Control`); `/downloads` errors are
+    `no-store` on both. JSON responses are gzipped under the same rules as
+    REST: same 1 KiB threshold, `Vary: Accept-Encoding` on every response
+    (`304` included), and an `ETag` computed from the uncompressed
+    representation. `/downloads` files are never compressed. The embedded
+    engine exposes no SSE endpoint, so the SSE exclusion does not arise there.
+    Pointing a browser at the embedded port would still require adding CORS.
 
 ## Error codes
 

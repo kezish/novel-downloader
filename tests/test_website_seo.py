@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SITE = ROOT / "website"
 INDEX = SITE / "index.html"
 ERROR_PAGE = SITE / "404.html"
+CHANGELOG_PAGE = SITE / "changelog.html"
 ROBOTS = SITE / "robots.txt"
 SITEMAP = SITE / "sitemap.txt"
 SITEMAP_XML = SITE / "sitemap.xml"
@@ -40,6 +41,7 @@ SITE_PREFIX = "/noveldl/"
 SITE_BASE = f"{SITE_ORIGIN}{SITE_PREFIX}"
 INDEX_URL = SITE_BASE
 ERROR_URL = f"{SITE_BASE}404.html"
+CHANGELOG_URL = f"{SITE_BASE}changelog.html"
 
 #: Namespaces used by the XML sitemap (sitemaps.org core plus hreflang).
 SITEMAP_NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
@@ -167,6 +169,16 @@ def error_text() -> str:
 @pytest.fixture(scope="module")
 def error_page(error_text: str) -> _Page:
     return _parse(error_text)
+
+
+@pytest.fixture(scope="module")
+def changelog_text() -> str:
+    return CHANGELOG_PAGE.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def changelog_page(changelog_text: str) -> _Page:
+    return _parse(changelog_text)
 
 
 @pytest.fixture(scope="module")
@@ -543,8 +555,8 @@ def test_sitemap_lists_every_indexable_page_once(index_page: _Page) -> None:
     assert listed == indexable
 
 
-def test_xml_sitemap_is_wellformed_and_matches_the_canonical(
-    index_page: _Page,
+def test_xml_sitemap_is_wellformed_and_matches_each_canonical(
+    index_page: _Page, changelog_page: _Page
 ) -> None:
     root = _xml_sitemap_root()
     assert root.tag == f"{{{SITEMAP_NS}}}urlset"
@@ -554,42 +566,47 @@ def test_xml_sitemap_is_wellformed_and_matches_the_canonical(
 
     entries = root.findall(f"{{{SITEMAP_NS}}}url")
     locs = _xml_sitemap_urls(root)
-    canonical = _canonical(index_page)
+    pages = {INDEX_URL: index_page, CHANGELOG_URL: changelog_page}
 
-    assert len(entries) == len(locs) == 1
-    assert locs == [canonical], "the XML sitemap must list the canonical URL"
+    assert len(entries) == len(locs) == len(pages)
+    assert set(locs) == set(pages), "the XML sitemap must list both pages"
     assert len(locs) == len(set(locs)), "sitemap.xml contains duplicates"
 
-    # Each <loc> must serve a real page under the deployed prefix.
-    page = _local_page(locs[0])
-    assert page.is_file()
-    assert page == INDEX
+    # Each <loc> must serve a real page under the deployed prefix, and the
+    # page's own canonical/hreflang set must agree with what the sitemap
+    # advertises.
+    for entry, loc in zip(entries, locs, strict=True):
+        page = pages[loc]
+        assert _canonical(page) == loc
+        local = _local_page(loc)
+        assert local.is_file()
+        assert local in {INDEX, CHANGELOG_PAGE}
+
+        # lastmod is a stable, hand-maintained date: present, ISO, not in the
+        # future.  Deriving it from mtimes would drift on every fresh checkout.
+        lastmod = entry.findtext(f"{{{SITEMAP_NS}}}lastmod")
+        assert lastmod is not None
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", lastmod), lastmod
+        assert date.fromisoformat(lastmod) <= date.today(), lastmod
+
+        # The hreflang annotations must match the page's own <link rel=alternate>
+        # set, or the sitemap would advertise languages the page does not render.
+        links = [
+            link
+            for link in entry.findall(f"{{{XHTML_NS}}}link")
+            if link.get("rel") == "alternate"
+        ]
+        tags = [link.get("hreflang", "") for link in links]
+        assert len(tags) == len(set(tags)), "duplicate hreflang in sitemap.xml"
+        alternates = {link.get("hreflang", ""): link.get("href", "") for link in links}
+        assert alternates == _alternates(page)
+        assert parse_qs(urlparse(alternates["en"]).query) == {"lang": ["en"]}
 
     # Every deployed HTML page except the 404 is listed exactly once.
     indexable = {path.name for path in SITE.glob("*.html")} - NON_INDEXABLE
     assert {_local_page(loc).name for loc in locs} == indexable
     assert ERROR_URL not in locs, "a 404 page must never be advertised"
     assert "404" not in SITEMAP_XML.read_text(encoding="utf-8")
-
-    # lastmod is a stable, hand-maintained date: present, ISO, not in the
-    # future.  Deriving it from mtimes would drift on every fresh checkout.
-    lastmod = entries[0].findtext(f"{{{SITEMAP_NS}}}lastmod")
-    assert lastmod is not None
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", lastmod), lastmod
-    assert date.fromisoformat(lastmod) <= date.today(), lastmod
-
-    # The hreflang annotations must match the page's own <link rel=alternate>
-    # set, or the sitemap would advertise languages the page does not render.
-    links = [
-        link
-        for link in entries[0].findall(f"{{{XHTML_NS}}}link")
-        if link.get("rel") == "alternate"
-    ]
-    tags = [link.get("hreflang", "") for link in links]
-    assert len(tags) == len(set(tags)), "duplicate hreflang in sitemap.xml"
-    alternates = {link.get("hreflang", ""): link.get("href", "") for link in links}
-    assert alternates == _alternates(index_page)
-    assert parse_qs(urlparse(alternates["en"]).query) == {"lang": ["en"]}
 
 
 # --------------------------------------------------------------------------
@@ -642,14 +659,111 @@ def _check_anchor(
         assert fragment in page.ids, f"dead anchor: {href}"
 
 
-def test_all_internal_links_resolve(index_page: _Page, error_page: _Page) -> None:
-    pages = {INDEX.resolve(): index_page, ERROR_PAGE.resolve(): error_page}
+def test_all_internal_links_resolve(
+    index_page: _Page, error_page: _Page, changelog_page: _Page
+) -> None:
+    pages = {
+        INDEX.resolve(): index_page,
+        ERROR_PAGE.resolve(): error_page,
+        CHANGELOG_PAGE.resolve(): changelog_page,
+    }
 
     assert index_page.anchor_hrefs, "the home page has no anchors at all"
     for href in index_page.anchor_hrefs:
         _check_anchor(href, INDEX, pages)
     for href in error_page.anchor_hrefs:
         _check_anchor(href, ERROR_PAGE, pages)
+    assert changelog_page.anchor_hrefs, "the changelog page has no anchors"
+    for href in changelog_page.anchor_hrefs:
+        _check_anchor(href, CHANGELOG_PAGE, pages)
+
+
+# --------------------------------------------------------------------------
+# the changelog page
+# --------------------------------------------------------------------------
+def test_changelog_title_and_description_fit_search_snippets(
+    changelog_text: str, changelog_page: _Page
+) -> None:
+    title = _title(changelog_text)
+    assert 0 < len(title) <= TITLE_MAX, f"title is {len(title)} characters"
+    assert "\n" not in title
+
+    description = _one(changelog_page, "description", attr="name")
+    assert DESC_MIN <= len(description) <= DESC_MAX, (
+        f"description is {len(description)} characters"
+    )
+    assert description == description.strip()
+    assert "\n" not in description
+    assert not description.startswith(("http://", "https://"))
+
+
+def test_changelog_open_graph_and_twitter_cards_are_complete(
+    changelog_page: _Page,
+) -> None:
+    canonical = _canonical(changelog_page)
+    assert canonical == CHANGELOG_URL
+
+    for key in OG_REQUIRED:
+        _one(changelog_page, key)
+    for key in (
+        "twitter:card",
+        "twitter:title",
+        "twitter:description",
+        "twitter:image",
+        "twitter:image:alt",
+    ):
+        _one(changelog_page, key, attr="name")
+
+    assert _one(changelog_page, "og:type") == "website"
+    assert _one(changelog_page, "og:url") == canonical
+    assert _one(changelog_page, "og:locale") == "zh_CN"
+    assert "en_US" in _content(changelog_page, "og:locale:alternate")
+
+    image = _one(changelog_page, "og:image")
+    assert image == f"{SITE_BASE}og-image.png"
+    assert (SITE / "og-image.png").is_file()
+    assert _one(changelog_page, "og:image:width") == "1200"
+    assert _one(changelog_page, "og:image:height") == "630"
+
+    assert _one(changelog_page, "twitter:card", attr="name") == "summary_large_image"
+    assert _one(changelog_page, "twitter:title", attr="name") == _one(
+        changelog_page, "og:title"
+    )
+    assert _one(changelog_page, "twitter:description", attr="name") == _one(
+        changelog_page, "og:description"
+    )
+    assert _one(changelog_page, "twitter:image", attr="name") == image
+    assert _one(changelog_page, "twitter:image:alt", attr="name") == _one(
+        changelog_page, "og:image:alt"
+    )
+
+
+def test_changelog_hreflang_alternates_are_self_consistent(
+    changelog_page: _Page,
+) -> None:
+    canonical = _canonical(changelog_page)
+    alternates = _alternates(changelog_page)
+
+    assert set(alternates) == {"zh-CN", "en", "x-default"}
+    assert alternates["x-default"] == canonical
+    assert alternates["zh-CN"] == canonical
+    assert alternates["en"] != alternates["zh-CN"]
+
+    html = [data for tag, data in changelog_page.elements if tag == "html"][0]
+    assert html["lang"] == "zh-CN"
+    assert html["lang"] in alternates
+
+    for tag, url in alternates.items():
+        if tag != "x-default":
+            assert LOCALE_TAG.fullmatch(tag), tag
+        parsed = urlparse(url)
+        assert f"{parsed.scheme}://{parsed.netloc}" == SITE_ORIGIN, tag
+        assert parsed.fragment == "", tag
+        assert _local_page(url) == CHANGELOG_PAGE, tag
+
+    assert parse_qs(urlparse(alternates["en"]).query) == {"lang": ["en"]}
+    assert urlparse(alternates["zh-CN"]).query == ""
+    assert urlparse(alternates["x-default"]).query == ""
 
 
 # --------------------------------------------------------------------------

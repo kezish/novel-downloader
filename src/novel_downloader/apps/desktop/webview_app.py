@@ -113,6 +113,13 @@ def download_asset(*args: Any, **kwargs: Any) -> Any:
     return impl(*args, **kwargs)
 
 
+def download_cancelled(exc: BaseException) -> bool:
+    """Whether *exc* is the updater's cancellation signal (deferred import)."""
+    from novel_downloader.apps.common.updater import DownloadCancelled
+
+    return isinstance(exc, DownloadCancelled)
+
+
 def parse_manifest(*args: Any, **kwargs: Any) -> Any:
     """Deferred :func:`updater.parse_manifest`."""
     from novel_downloader.apps.common.updater import parse_manifest as impl
@@ -183,6 +190,11 @@ _PAYLOAD_DIRNAME = "_internal"
 #: Timeout for an asset transfer, in seconds.  Downloads are much larger than
 #: the release document, so they get their own (generous) budget.
 _UPDATE_DOWNLOAD_TIMEOUT = 300.0
+#: How long ``cancel_update_download`` waits for the worker to unwind before
+#: reporting the cancel as still pending.  The probe runs between chunks, so a
+#: healthy transfer stops well inside this; only a blocked socket read can
+#: outlast it, and the page keeps polling until that read returns.
+_UPDATE_CANCEL_WAIT = 3.0
 #: Named mutex mirrored by ``AppMutex`` in ``packaging/noveldl_installer.iss``:
 #: holding it lets the installer's Restart Manager identify this process.
 _UPDATE_MUTEX_NAME = "NovelDownloader-UpdateMutex"
@@ -1172,6 +1184,8 @@ def _i18n_catalog() -> dict[str, str]:
         "Later": t("Later"),
         "Downloading…": t("Downloading…"),
         "Installing…": t("Installing…"),
+        "Cancel download": t("Cancel download"),
+        "Update download cancelled": t("Update download cancelled"),
         "Update download failed": t("Update download failed"),
         "Could not start the installer": t("Could not start the installer"),
         # subtitles
@@ -1808,6 +1822,7 @@ def _idle_download_state() -> dict[str, Any]:
     return {
         "active": False,
         "ok": False,
+        "cancelled": False,
         "received": 0,
         "total": 0,
         "error": None,
@@ -3330,6 +3345,14 @@ class ApiBridge:
         self._download_guard = threading.Lock()
         self._download_active = False
         self._downloaded: _DownloadedUpdate | None = None
+        # Cooperative cancellation for the transfer in flight: ``download_asset``
+        # polls it between chunks, so a cancel lands within one chunk.  The
+        # event is cleared by whoever claims ``_download_active``, under the
+        # same lock, so it can never leak into the next transfer.
+        self._download_cancel = threading.Event()
+        # Worker of the transfer in flight, so a cancel can wait for it to
+        # unwind.  ``None`` for a synchronous call (nothing to join).
+        self._download_thread: threading.Thread | None = None
         # Byte-level transfer progress, polled by the update bar.  The auto
         # download runs in the background, so without this the page can only
         # show "Downloading…" for however long a 60 MB asset takes.
@@ -4317,6 +4340,41 @@ class ApiBridge:
             logger.debug("Update download failed", exc_info=True)
             return self._download_error(format_error(exc))
 
+    def cancel_update_download(self) -> dict[str, Any]:
+        """
+        Stop the update transfer in flight.
+
+        The transfer probe is polled between chunks, so this raises the flag
+        and then waits (bounded by :data:`_UPDATE_CANCEL_WAIT`) for the worker
+        to unwind.  The bytes already received stay in the resumable
+        ``.part`` and no final file is produced, so a later call simply
+        continues the transfer.
+
+        Calling it with nothing running is harmless and idempotent: it reports
+        the current terminal state and never poisons the next transfer.  A
+        transfer that finished first wins: it is reported as ``ok`` rather
+        than relabelled "cancelled".
+
+        Never raises.
+
+        :return: ``{"ok", "cancelled", "active", "pending", "error"}``.
+            ``cancelled`` is true for the transfer this call stopped (or an
+            already-cancelled one); ``active``/``pending`` stay true only when
+            a blocked read is still unwinding, in which case the page keeps
+            polling and the worker publishes the terminal state itself.
+        """
+        try:
+            return self._cancel_update_download()
+        except Exception as exc:  # noqa: BLE001 - bridge methods never raise
+            logger.debug("Update download cancel failed", exc_info=True)
+            return {
+                "ok": False,
+                "cancelled": False,
+                "active": self._download_active,
+                "pending": False,
+                "error": format_error(exc),
+            }
+
     def install_update(self) -> dict[str, Any]:
         """
         Launch the downloaded installer and close the app.
@@ -4478,13 +4536,21 @@ class ApiBridge:
             logger.debug("Install on exit failed", exc_info=True)
 
     def _on_window_closing(self) -> bool:
-        """pywebview closing hook: install first, then let the window go.
+        """pywebview closing hook: cancel, install, then let the window go.
+
+        A transfer still running is cancelled first: quitting must not leave a
+        worker writing into ``updates/`` after the window is gone, and a
+        partially fetched asset has nothing to install anyway.
 
         Whatever the install path does, the window must close: a failed
         install is logged and retried on the next quit, and a stuck hook would
         leave a process running (holding the very files the installer needs)
         with no window.  Returning ``True`` always lets pywebview proceed.
         """
+        try:
+            self._cancel_update_download()
+        except Exception:  # noqa: BLE001 - the window must still close
+            logger.debug("Cancelling the update download failed", exc_info=True)
         try:
             self._install_on_exit()
         except Exception:  # noqa: BLE001 - the window must still close
@@ -4700,11 +4766,16 @@ class ApiBridge:
                 # background worker) must not spawn two transfers; the page
                 # also gets an ``active`` progress state immediately instead
                 # of showing a frozen size until the worker gets scheduled.
+                # The cancel flag is cleared under the same lock that claims
+                # the slot, so a cancel can never leak into the next transfer.
                 self._download_active = True
+                self._download_cancel.clear()
+                self._download_thread = None
                 claimed = True
                 self._update_download_state = {
                     "active": True,
                     "ok": False,
+                    "cancelled": False,
                     "received": 0,
                     "total": int(cache.info.asset.size or 0)
                     if cache.info.asset is not None
@@ -4713,16 +4784,12 @@ class ApiBridge:
                     "path": None,
                     "version": version or None,
                 }
-            threading.Thread(
-                target=self._auto_download_worker,
-                args=(True,),
-                name="novel-desktop-update-dl",
-                daemon=True,
-            ).start()
+            self._start_download_thread(lambda: self._auto_download_worker(True))
         except Exception:  # noqa: BLE001 - never break the check worker
             if claimed:
                 with self._download_guard:
                     self._download_active = False
+                    self._download_thread = None
                     self._update_download_state["active"] = False
             logger.debug("Could not start the background download", exc_info=True)
 
@@ -4755,6 +4822,10 @@ class ApiBridge:
                 busy = self._download_active
                 if not busy:
                     self._download_active = True
+                    # Same rule as the async claim: a flag left over from a
+                    # cancelled transfer must not abort this new one.
+                    self._download_cancel.clear()
+                    self._download_thread = None
             if busy:
                 # Do not touch the shared progress dict: the worker that owns
                 # the slot is still updating it, and a rejected second call
@@ -4790,6 +4861,7 @@ class ApiBridge:
                         self._update_download_state = {
                             "active": False,
                             "ok": True,
+                            "cancelled": False,
                             "received": size,
                             "total": size,
                             "error": None,
@@ -4828,6 +4900,7 @@ class ApiBridge:
                 self._update_download_state = {
                     "active": True,
                     "ok": False,
+                    "cancelled": False,
                     "received": 0,
                     "total": int(asset.size or 0),
                     "error": None,
@@ -4856,10 +4929,18 @@ class ApiBridge:
                     progress=on_progress,
                     attempts=3,
                     expected_size=asset.size,
+                    # Polled between chunks: a cancel stops within one chunk
+                    # instead of after the whole 60 MB asset.
+                    should_cancel=self._download_cancel.is_set,
                 )
             except (ValueError, OSError) as exc:
                 logger.debug("Asset transfer failed: %s", exc)
                 return self._download_error(format_error(exc))
+            except Exception as exc:  # noqa: BLE001 - cancellation is not a failure
+                if download_cancelled(exc):
+                    logger.debug("Update download cancelled by the user")
+                    return self._download_cancelled()
+                raise
 
             final = Path(written)
             if not _inside_dir(final, updates_dir):
@@ -4895,6 +4976,7 @@ class ApiBridge:
                 self._update_download_state = {
                     "active": False,
                     "ok": True,
+                    "cancelled": False,
                     "received": int(final.stat().st_size),
                     "total": int(final.stat().st_size),
                     "error": None,
@@ -4910,6 +4992,8 @@ class ApiBridge:
         finally:
             with self._download_guard:
                 self._download_active = False
+                if self._download_thread is threading.current_thread():
+                    self._download_thread = None
                 self._update_download_state["active"] = False
 
     def _download_error(self, message: str) -> dict[str, Any]:
@@ -4919,6 +5003,7 @@ class ApiBridge:
             self._update_download_state = {
                 "active": False,
                 "ok": False,
+                "cancelled": False,
                 "received": int(state.get("received") or 0),
                 "total": int(state.get("total") or 0),
                 "error": message,
@@ -4927,12 +5012,84 @@ class ApiBridge:
             }
         return {"ok": False, "path": None, "error": message}
 
+    def _download_cancelled(self) -> dict[str, Any]:
+        """Publish a cancellation, which is a terminal state but not a failure.
+
+        The worker's ``finally`` releases ``_download_active``; this replaces
+        the progress dict so the bar offers the download again, shows the
+        bytes that were kept in the resumable ``.part``, and never raises an
+        error toast for something the user asked for.
+        """
+        with self._download_guard:
+            state = self._update_download_state
+            self._update_download_state = {
+                "active": False,
+                "ok": False,
+                "cancelled": True,
+                "received": int(state.get("received") or 0),
+                "total": int(state.get("total") or 0),
+                "error": None,
+                "path": None,
+                "version": state.get("version"),
+            }
+        return {"ok": False, "cancelled": True, "path": None, "error": None}
+
+    def _cancel_update_download(self) -> dict[str, Any]:
+        """Implementation of :meth:`cancel_update_download` (may raise)."""
+        with self._download_guard:
+            active = self._download_active
+            thread = self._download_thread if active else None
+            if active:
+                # Set under the guard so a cancel can never interleave with the
+                # claim that clears it for a *new* transfer.
+                self._download_cancel.set()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(_UPDATE_CANCEL_WAIT)
+
+        with self._download_guard:
+            active = self._download_active
+            state = dict(self._update_download_state)
+            if active:
+                # The worker is still unwinding (a blocking socket read is the
+                # only way to outlast the join).  Publish "cancelling" but let
+                # the worker own the terminal state: it releases the slot.
+                self._update_download_state["cancelled"] = True
+                return {
+                    "ok": True,
+                    "cancelled": True,
+                    "active": True,
+                    "pending": True,
+                    "error": None,
+                }
+        # Completion wins over a late cancel: a worker that already published
+        # its verified file is not relabelled cancelled.  With nothing running
+        # this is a no-op that reports the current terminal state (so a second
+        # cancel is idempotent and a transfer after an error keeps its error).
+        return {
+            "ok": True,
+            "cancelled": bool(state.get("cancelled")),
+            "active": False,
+            "pending": False,
+            "error": None,
+        }
+
+    def _start_download_thread(self, target: Callable[[], None]) -> None:
+        """Spawn the transfer worker and remember it so cancel can join it."""
+        thread = threading.Thread(
+            target=target, name="novel-desktop-update-dl", daemon=True
+        )
+        with self._download_guard:
+            self._download_thread = thread
+        thread.start()
+
     def update_download_state(self) -> dict[str, Any]:
         """
         Byte-level progress of the background update download.
 
-        :return: ``{"active", "ok", "received", "total", "error", "path"}``;
-            ``total`` is 0 when the server does not publish a length.
+        :return: ``{"active", "ok", "cancelled", "received", "total", "error",
+            "path", "percent"}``; ``total`` is 0 when the server does not
+            publish a length, and ``cancelled`` is true only after the user
+            stopped a transfer (``error`` stays ``None`` in that case).
         """
         with self._download_guard:
             state = dict(self._update_download_state)
@@ -4973,11 +5130,16 @@ class ApiBridge:
                 }
             # Reserve the slot before spawning the worker.  It stays held
             # until the worker releases it in ``_download_update``'s finally
-            # block, so a synchronous call cannot slip in between.
+            # block, so a synchronous call cannot slip in between.  Clearing
+            # the cancel flag under the same lock is what makes a retry after
+            # a cancellation start from a clean slate.
             self._download_active = True
+            self._download_cancel.clear()
+            self._download_thread = None
             self._update_download_state = {
                 "active": True,
                 "ok": False,
+                "cancelled": False,
                 "received": 0,
                 "total": 0,
                 "error": None,
@@ -4993,10 +5155,13 @@ class ApiBridge:
                 self._download_error(t("Update download failed"))
 
         try:
-            threading.Thread(
-                target=worker, name="novel-desktop-update-dl", daemon=True
-            ).start()
+            self._start_download_thread(worker)
         except Exception:  # noqa: BLE001 - never leave the slot reserved
+            with self._download_guard:
+                # No worker will ever run to release the reservation it was
+                # given above: release it here or no retry could ever start.
+                self._download_active = False
+                self._download_thread = None
             self._download_error(t("Update download failed"))
             return {
                 "started": False,

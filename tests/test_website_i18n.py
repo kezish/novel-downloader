@@ -31,6 +31,11 @@ markup (Chinese runs plus ``<span lang="en">`` halves) so it stays complete
 with JavaScript disabled; its contract is "every English run has a Chinese
 counterpart", covered below.
 
+``changelog.html`` uses the same ``data-en`` mechanism as ``index.html`` but
+carries its own inline switch (so the two pages cannot overwrite each other's
+title/description).  Its pairs get the same completeness, parity and residue
+checks as the home page.
+
 Static, stdlib only, no browser.
 """
 
@@ -46,6 +51,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SITE = ROOT / "website"
 INDEX = SITE / "index.html"
 ERROR_PAGE = SITE / "404.html"
+CHANGELOG_PAGE = SITE / "changelog.html"
 JS_FILE = SITE / "main.js"
 
 CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -243,6 +249,16 @@ def index_text() -> str:
 @pytest.fixture(scope="module")
 def error_text() -> str:
     return ERROR_PAGE.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def changelog_text() -> str:
+    return CHANGELOG_PAGE.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def changelog_tree(changelog_text: str) -> _Tree:
+    return _parse(changelog_text)
 
 
 @pytest.fixture(scope="module")
@@ -604,3 +620,75 @@ def test_copy_state_dictionary_covers_both_languages(js: str) -> None:
         assert f'"{key}"' in js, f"{key} is never read"
     assert "COPY_TEXT[labelKey][copyLang()]" in js
     assert "COPY_TEXT[noteKey][copyLang()]" in js
+
+
+# --------------------------------------------------------------------------
+# changelog.html: the same data-en pairs, on a second document
+# --------------------------------------------------------------------------
+CHANGELOG_VIEW_SKIP_TAGS = {"head", "script", "style", "noscript"}
+CHANGELOG_VIEW_SKIP_CLASSES = {"brand-name", "foot-brand"}
+
+
+def test_changelog_data_en_pairs_are_complete(changelog_tree: _Tree) -> None:
+    """Both halves must exist, differ, and stay in their own language."""
+    entries = _data_en_entries(changelog_tree)
+    # A floor, not a target: it catches an accidental mass deletion.
+    assert len(entries) >= 45, f"only {len(entries)} data-en entries"
+
+    problems = []
+    for _, _, zh, en in entries:
+        if not en.strip():
+            problems.append(f"empty data-en: {zh[:50]!r}")
+        if not zh:
+            problems.append(f"empty zh source: {en[:50]!r}")
+        if zh and en.strip() == zh:
+            problems.append(f"data-en repeats the zh source: {zh[:50]!r}")
+        if zh and not CJK.search(zh):
+            problems.append(f"zh source has no Chinese: {zh[:50]!r}")
+        if CJK.search(en):
+            problems.append(f"data-en still contains Chinese: {en[:60]!r}")
+    assert not problems, problems[:5]
+
+
+def test_changelog_markup_parity_between_the_two_languages(
+    changelog_tree: _Tree,
+) -> None:
+    """``data-en`` is assigned to innerHTML, so the English value must mirror
+    any inline markup on the Chinese side."""
+    mismatched = []
+    for node, _, _, en in _data_en_entries(changelog_tree):
+        zh_tags = [child.tag for child, _ in _elements(node)]
+        en_tags = TAG_NAME.findall(en)
+        if zh_tags != en_tags:
+            mismatched.append((zh_tags, en_tags, en[:60]))
+    assert not mismatched, mismatched[:5]
+
+
+def test_changelog_english_view_keeps_no_chinese(changelog_tree: _Tree) -> None:
+    leaks = []
+    for text, ancestors in _en_leaves(changelog_tree.root):
+        value = text.strip()
+        if not value or not CJK.search(value):
+            continue
+        if any(node.tag in CHANGELOG_VIEW_SKIP_TAGS for node in ancestors):
+            continue
+        if any(_classes(node) & CHANGELOG_VIEW_SKIP_CLASSES for node in ancestors):
+            continue
+        if value.startswith(EN_VIEW_SKIP_PREFIXES):
+            continue
+        leaks.append(value[:80])
+    assert not leaks, f"Chinese left in the English view: {leaks[:5]}"
+
+
+def test_changelog_chinese_view_keeps_no_english_sentences(
+    changelog_tree: _Tree,
+) -> None:
+    leaks = []
+    for text, ancestors in _texts(changelog_tree.root):
+        value = re.sub(r"\s+", " ", text).strip()
+        if not value or not LATIN_SENTENCE.search(value):
+            continue
+        if any(node.tag in CHANGELOG_VIEW_SKIP_TAGS for node in ancestors):
+            continue
+        leaks.append(value[:80])
+    assert not leaks, f"English prose in the Chinese view: {leaks[:5]}"

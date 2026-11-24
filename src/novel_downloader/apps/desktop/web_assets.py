@@ -847,9 +847,11 @@ mark { background: var(--accent-soft-2); color: var(--text); border-radius: 2px;
           <svg class="icon"><use href="#i-down"/></svg>
           <span id="update-text" role="status" aria-live="polite" data-i18n="Update available: v{ver}">Update available: v{ver}</span>
           <span class="u-size" id="update-size"></span>
+          <span class="sr-only" id="update-status" role="status" aria-live="polite"></span>
         </div>
         <div class="u-acts">
           <button class="btn btn-primary btn-sm" id="update-install" data-i18n="Download and install">Download and install</button>
+          <button class="btn btn-ghost btn-sm" id="update-cancel" data-i18n="Cancel download" hidden>Cancel download</button>
           <button class="btn btn-ghost btn-sm" id="update-notes" data-i18n="Release notes">Release notes</button>
           <button class="btn btn-ghost btn-sm" id="update-skip" data-i18n="Skip this version">Skip this version</button>
           <button class="btn btn-ghost btn-sm" id="update-later" data-i18n="Later">Later</button>
@@ -2087,11 +2089,27 @@ function applyUpdateState(st) {
   }
 }
 
+// The cancel button exists only while bytes are in flight: once the transfer
+// is verified (or cancelled/failed) there is nothing left to stop.
+function setUpdateCancelVisible(visible) {
+  const btn = $("#update-cancel");
+  if (btn) btn.hidden = !visible;
+}
+
+// A dedicated live region for download outcomes. ``#update-text`` names the
+// release and is rewritten by every state poll, so an announcement put there
+// would be overwritten by the next poll instead of being read out.
+function setUpdateStatus(text) {
+  const el = $("#update-status");
+  if (el && el.textContent !== text) el.textContent = text;
+}
+
 function updateDownloadUi(st) {
   const size = $("#update-size");
   if (!size || !st) return;
   const got = Number(st.received) || 0;
   const total = Number(st.total) || 0;
+  setUpdateCancelVisible(!!st.active);
   if (st.active) {
     const pct = total ? Math.min(100, Math.floor(got * 100 / total)) : 0;
     size.textContent = total
@@ -2099,8 +2117,15 @@ function updateDownloadUi(st) {
       : fmtSize(got);
     return;
   }
-  if (st.ok) { size.textContent = fmtSize(got || total); return; }
-  if (st.error) size.textContent = "";
+  if (st.ok) { size.textContent = fmtSize(got || total); setUpdateStatus(""); return; }
+  if (st.cancelled) {
+    // Nothing verifies and nothing failed: the resumable partial is kept, so
+    // the bar goes back to offering the download.
+    size.textContent = "";
+    setUpdateStatus(t("Update download cancelled"));
+    return;
+  }
+  if (st.error) { size.textContent = ""; setUpdateStatus(""); }
 }
 
 function trackUpdateDownload() {
@@ -2117,7 +2142,9 @@ function trackUpdateDownload() {
       if (!st) return { ok: false, error: "" };
       updateDownloadUi(st);
       if (!st.active) {
-        if (st.ok || st.error) return st;
+        // ``cancelled`` is terminal, like ``ok``/``error``: waiting out the
+        // idle budget would only delay the bar's "cancelled" state.
+        if (st.ok || st.error || st.cancelled) return st;
         if (idle++ >= 10) return st;
         await updateSleep(500);
         continue;
@@ -2224,6 +2251,9 @@ $("#update-install").onclick = async () => {
         }
         const st = await trackUpdateDownload();
         if (!st || !st.ok) {
+          // A cancel is not a failure: the user asked for it, and the resumable
+          // partial means the next click just continues the transfer.
+          if (st && st.cancelled) return;
           toast((st && st.error) || t("Update download failed"), "err", 9000);
           return;
         }
@@ -2255,6 +2285,43 @@ $("#update-install").onclick = async () => {
       // the install again rather than another download.
       setUpdateInstallLabel(!!(updates.state && updates.state.downloaded));
     }
+  }
+};
+
+$("#update-cancel").onclick = async () => {
+  const btn = $("#update-cancel");
+  if (!btn || btn.disabled) return;
+  // Disable synchronously: a second click while the worker unwinds must not
+  // queue another join. The button is re-enabled for a retry below.
+  btn.disabled = true;
+  try {
+    const r = await api("cancel_update_download");
+    if (r && r.error) {
+      toast(r.error, "err", 8000);
+      return;
+    }
+    // Follow the worker until it has unwound (or completed): a cancel that
+    // arrived too late is reported as a finished download, never as cancelled.
+    const st = await trackUpdateDownload();
+    if (st && st.ok) {
+      updates.state = { ...(updates.state || {}), downloaded: true, downloaded_size: st.received || st.total || 0 };
+      setUpdateInstallLabel(true);
+      setUpdateStatus("");
+      return;
+    }
+    if (!st || !st.cancelled) {
+      toast((st && st.error) || t("Update download failed"), "err", 9000);
+      return;
+    }
+    setUpdateStatus(t("Update download cancelled"));
+    setUpdateInstallLabel(false);
+  } catch (e) {
+    toast(String((e && e.message) || e), "err", 8000);
+  } finally {
+    btn.disabled = false;
+    // The transfer is terminal by the time the poll above resolves, so there
+    // is nothing left to cancel; a new download shows the button again.
+    setUpdateCancelVisible(false);
   }
 };
 
