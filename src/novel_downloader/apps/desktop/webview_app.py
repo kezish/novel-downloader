@@ -4288,13 +4288,19 @@ class ApiBridge:
         try:
             if sys.platform != "win32":
                 return
-            if not _prefs_flag(_load_prefs(), "auto_install_on_exit", True):
+            prefs = _load_prefs()
+            if not _prefs_flag(prefs, "auto_install_on_exit", True):
                 return
             with self._download_guard:
                 record = self._downloaded
             if record is None:
                 return
             if self._version_conflict(record):
+                return
+            if _version_skipped(prefs, record.version):
+                # "Skip this version" also covers an unattended exit install:
+                # a background transfer that finished after the skip must not
+                # be launched when the user quits.
                 return
             target = record.path
             suffix = target.suffix.lower()
@@ -4321,7 +4327,9 @@ class ApiBridge:
                 # A portable bundle needs the PowerShell replace-after-exit
                 # helper; ``_launch_portable_update`` gives the claim back if
                 # it cannot run, so a later cleanup can still see the file.
-                self._launch_portable_update(record, updates_dir)
+                # The window is already closing, so nothing must schedule a
+                # second destroy from inside the closing hook.
+                self._launch_portable_update(record, updates_dir, schedule_exit=False)
                 return
             try:
                 subprocess.Popen(  # noqa: S603
@@ -4335,8 +4343,17 @@ class ApiBridge:
             logger.debug("Install on exit failed", exc_info=True)
 
     def _on_window_closing(self) -> bool:
-        """pywebview closing hook: install first, then let the window go."""
-        self._install_on_exit()
+        """pywebview closing hook: install first, then let the window go.
+
+        Whatever the install path does, the window must close: a failed
+        install is logged and retried on the next quit, and a stuck hook would
+        leave a process running (holding the very files the installer needs)
+        with no window.  Returning ``True`` always lets pywebview proceed.
+        """
+        try:
+            self._install_on_exit()
+        except Exception:  # noqa: BLE001 - the window must still close
+            logger.debug("Install on exit was interrupted", exc_info=True)
         return True
 
     def _attach_window(self, window: Any) -> None:
@@ -4525,6 +4542,7 @@ class ApiBridge:
         the user never waits for a download.  Failures stay quiet: the
         button still downloads on demand.
         """
+        claimed = False
         try:
             prefs = _load_prefs()
             if not _prefs_flag(prefs, "auto_download_updates", True):
@@ -4538,17 +4556,49 @@ class ApiBridge:
             # not to be reminded about.
             if _version_skipped(prefs, cache.info.latest):
                 return
+            version = _normalise_version(cache.info.latest)
             with self._download_guard:
                 if self._downloaded is not None or self._download_active:
                     return
-            threading.Thread(target=self._auto_download_worker, daemon=True).start()
+                # Reserve the transfer slot before the thread exists.  Two
+                # check results landing together (or a click racing the
+                # background worker) must not spawn two transfers; the page
+                # also gets an ``active`` progress state immediately instead
+                # of showing a frozen size until the worker gets scheduled.
+                self._download_active = True
+                claimed = True
+                self._update_download_state = {
+                    "active": True,
+                    "ok": False,
+                    "received": 0,
+                    "total": int(cache.info.asset.size or 0)
+                    if cache.info.asset is not None
+                    else 0,
+                    "error": None,
+                    "path": None,
+                    "version": version or None,
+                }
+            threading.Thread(
+                target=self._auto_download_worker,
+                args=(True,),
+                name="novel-desktop-update-dl",
+                daemon=True,
+            ).start()
         except Exception:  # noqa: BLE001 - never break the check worker
+            if claimed:
+                with self._download_guard:
+                    self._download_active = False
+                    self._update_download_state["active"] = False
             logger.debug("Could not start the background download", exc_info=True)
 
-    def _auto_download_worker(self) -> None:
-        """Download the pending update without a user action."""
+    def _auto_download_worker(self, claimed: bool = False) -> None:
+        """Download the pending update without a user action.
+
+        :param claimed: ``_maybe_auto_download`` already reserved the transfer
+            slot; the worker must therefore not try to claim it again.
+        """
         try:
-            result = self._download_update()
+            result = self._download_update(claimed=claimed)
         except Exception:  # noqa: BLE001
             logger.debug("Background update download raised", exc_info=True)
             return
@@ -4586,6 +4636,38 @@ class ApiBridge:
             if info is None or not info.available:
                 return self._download_error(t("No update is available to download"))
             version = _normalise_version(info.latest)
+            # A repeat request (double click, a page whose cached state still
+            # says "download", a retried bridge call) must not fetch the asset
+            # again while a verified file for this exact release is on disk.
+            # The file is re-hashed first, so one tampered with since the
+            # transfer is dropped and fetched afresh instead of being reported
+            # as ready.
+            existing = self._ready_record()
+            if existing is not None:
+                if _safe_update_file(existing.path, _updates_dir()) and verify_file(
+                    existing.path, existing.sha256, expected_size=existing.size
+                ):
+                    try:
+                        size = int(existing.path.stat().st_size)
+                    except OSError:
+                        size = 0
+                    with self._download_guard:
+                        self._update_download_state = {
+                            "active": False,
+                            "ok": True,
+                            "received": size,
+                            "total": size,
+                            "error": None,
+                            "path": str(existing.path),
+                            "version": existing.version,
+                        }
+                    return {
+                        "ok": True,
+                        "path": str(existing.path),
+                        "error": None,
+                        "asset_name": existing.name,
+                    }
+                self._forget_download(existing, remove=True)
             asset = info.asset
             if asset is None:
                 return self._download_error(
@@ -4736,17 +4818,23 @@ class ApiBridge:
         The page polls :meth:`update_download_state` for bytes/percent, so the
         update bar stays responsive while a 60 MB asset is in flight.  A second
         call while a transfer is running reports ``started: False`` and
-        ``active: True`` — without touching the running progress state.
+        ``active: True`` — without touching the running progress state, and
+        without an ``error``: the page should follow the transfer in flight.
         """
         version = self._announced_version()
         with self._download_guard:
             if self._download_active:
                 # Deliberately leave the progress dict alone: a double click
                 # must not erase the bytes the running worker already reported.
+                # ``error`` stays ``None`` on purpose: the request did not
+                # fail, it was answered by the transfer that is already
+                # running, and the page must follow it (``trackUpdateDownload``)
+                # instead of toasting a failure for a healthy download.
                 return {
                     "started": False,
                     "active": True,
-                    "error": t("An update download is already running"),
+                    "error": None,
+                    "reason": "busy",
                 }
             # Reserve the slot before spawning the worker.  It stays held
             # until the worker releases it in ``_download_update``'s finally
@@ -4932,7 +5020,11 @@ class ApiBridge:
         }
 
     def _launch_portable_update(
-        self, record: _DownloadedUpdate, updates_dir: Path
+        self,
+        record: _DownloadedUpdate,
+        updates_dir: Path,
+        *,
+        schedule_exit: bool = True,
     ) -> dict[str, Any]:
         """Replace this portable folder after the app exits, then restart it.
 
@@ -4940,6 +5032,11 @@ class ApiBridge:
         helper waits for this process to end, expands the verified zip over the
         current folder and starts the new executable.  Only reachable for a
         ``portable`` install; the installer build keeps using Inno Setup.
+
+        :param schedule_exit: close the window after the helper is started.
+            The update button needs this; the closing hook (``_install_on_exit``)
+            does not, because the window is already on its way out and a second
+            ``destroy()`` from a worker thread can hang or log a false failure.
         """
 
         def refuse(message: str) -> dict[str, Any]:
@@ -5000,7 +5097,8 @@ class ApiBridge:
             return refuse(format_error(exc))
         pid = getattr(process, "pid", None)
         logger.info("Launched the portable update helper (pid=%s)", pid)
-        self._schedule_exit()
+        if schedule_exit:
+            self._schedule_exit()
         return {
             "ok": True,
             "error": None,
