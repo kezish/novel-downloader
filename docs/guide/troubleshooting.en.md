@@ -548,7 +548,7 @@ So on the embedded engine:
 
 ---
 
-## 4. Paths Containing Chinese Characters or Spaces
+## 4. Paths Containing Chinese Characters or Spaces {#path-chinese-spaces}
 
 **Symptoms**: export fails, resource files are missing, third-party tools report encoding errors, or Android download links break.
 
@@ -1350,7 +1350,142 @@ For all CLI options and examples see [CLI Usage § search subcommand](./cli-exam
 
 ---
 
-## 22. Still Stuck?
+## 22. Disk Full / Permission Denied / File in Use {#disk-permission-locks}
+
+All three failures happen when data is written: `ENOSPC` means the volume or quota is full, `EACCES` / `EPERM` means there is no write permission, and on Windows a file is often briefly held by another process or an antivirus scanner. Identify which one you have, then work through the relevant subsection. Backup, verification and capacity planning are covered in [Storage and Backup](./storage.en.md) and [Performance and Capacity](./performance.en.md#disk-backup); this section only covers diagnosis and recovery.
+
+### 22.1 `ENOSPC`: Out of Space or Quota {#enospc}
+
+**Symptoms**: a command or task ends with `OSError: [Errno 28] No space left on device`, Windows `[WinError 112] There is not enough space on the disk`, or a macOS quota error. What each entry point does:
+
+| Entry point | What you see | What has been written |
+| --- | --- | --- |
+| `storage backup` | Fails while writing a snapshot's temporary file; `--json` prints one line with `ok:false` and a stable `error` category (disk full usually yields `io_error` or `database_error`), exit code `1` | The whole set this run wrote is rolled back and removed; source databases and old backups are untouched |
+| `storage restore` | Fails while writing a snapshot or a `.pre-restore-*.bak`; exit code `1` | Already installed targets are rolled back; the original database (or its `.pre-restore` copy) remains |
+| Music download | The track result is marked failed (`retryable: true`) and the batch continues with the remaining tracks | `<target>.part` is kept and resumed with `Range` on the next run; it is never treated as complete |
+| `config import` / desktop settings import | Reports `Could not write ...` / "Could not export the settings"; exit code `1` | The temporary file is removed; the existing `settings.toml` / `desktop_prefs.json` is unchanged |
+| Desktop auto-update | A fresh transfer compares the advertised total with free space before starting and refuses when it does not fit; a transfer that fills the disk is retried | A resumable `.part` is kept; in the update folder, `.part` files older than a day and finished packages older than a week are pruned |
+| TXT / HTML export | The atomic write fails and reports an error | The temporary file is removed; the previous export stays exactly as it was |
+
+**Verify**:
+
+```bash
+novel-cli doctor --json | jq '.checks[] | select(.key == "disk_space")'
+novel-cli storage --json        # free_bytes and top for each of the four data directories
+```
+
+`doctor`'s `disk_space` check looks at the volume holding the **output directory** and warns below 512 MiB. It is advisory (`fatal: false`): it only reports, and does not change the exit code. `storage` reports `free_bytes` per directory, because running out of space usually affects only the volume holding `raw_data`, the music folder, or the update folder. On Windows also check the disk quota in Explorer, OneDrive's "Free up space" state, and the virtual disk's capacity.
+
+**Fix**:
+
+1. Preview a cleanup first, then run it:
+
+   ```bash
+   novel-cli clean cache --dry-run
+   novel-cli clean book --site qidian <book_id> --all --dry-run
+   novel-cli storage --clean --dry-run
+   novel-cli doctor --fix --dry-run   # only removes .tmp/.part older than 7 days in output/cache/log
+   ```
+
+   `doctor --fix` never touches `raw_data`, backup directories, or the music folder; it only creates missing output/cache/log directories and removes expired temporary files inside them.
+
+2. Count the backup directory as part of capacity. `storage backup` writes a full snapshot, not an incremental one; each run needs free space roughly equal to the total source database size, and `--keep N` occupies about `N × one database`. Preview retention before applying it:
+
+   ```bash
+   novel-cli storage backup --out /path/to/backups --keep 7 --dry-run
+   novel-cli storage backup --out /path/to/backups --keep 7
+   ```
+
+   `--keep` deletes only files under `--out` whose names strictly match `chapter.<stage>.<UTC timestamp>.sqlite`; backups written by the current run are always protected.
+
+3. Move to another volume or a shorter root: point `raw_data_dir` / `output_dir` / `cache_dir` at a local disk with free space, or move the whole application home with `NOVEL_HOME`. Do not move these directories while a download, backup, or restore is running.
+
+4. Handle `.part` files: music and update `.part` files are **intentional resume points**; rerun the same command after freeing space and the transfer continues. Delete one by hand only after confirming that no process is using it and that you no longer want to resume. A normal `storage backup` failure (including Ctrl+C) removes the copies this run wrote; after a hard kill, the next backup sweeps leftover name claims and temporary files in the same directory. Expired temporary files in output/cache/log directories can be removed by `doctor --fix`. `doctor --fix` does not scan the backup directory, so leftovers there must be deleted by hand.
+
+### 22.2 `EACCES` / `EPERM`: No Permission or File in Use {#permission-denied}
+
+**Symptoms**: `PermissionError: [Errno 13] Permission denied`; on Windows, commonly `[WinError 5] Access is denied` or `[WinError 32] The process cannot access the file because it is being used by another process`. It can also show up as "cannot create a temporary file" or "cannot rename".
+
+**Common causes** (most frequent first):
+
+- A directory or file is read-only: the ACL grants no write access, the file has the read-only attribute, or the volume is mounted read-only.
+- On Windows, the target file is open in another process: an editor or preview pane, a sync client (OneDrive, Nutstore), an antivirus real-time scan, or the search indexer.
+- Controlled Folder Access or an enterprise policy blocks the write.
+- The directory was written once as administrator / with `sudo`, so a normal user can no longer write it; or it belongs to another user.
+
+**Verify**:
+
+```bash
+# POSIX: inspect the directory and current user, then actually try a write
+ls -ld raw_data downloads
+id
+touch raw_data/.write-test && rm raw_data/.write-test
+
+# Windows PowerShell: inspect the ACL and read-only attribute
+Get-Acl .\raw_data | Format-List
+attrib .\raw_data
+```
+
+The `storage` check in `novel-cli doctor --json` reports `writable`, `wal_read_only`, and a concrete suggestion; the output/cache/log directory checks actually write a probe file and report `EACCES` when it fails. On Windows, use Resource Monitor (`resmon`) → "Associated Handles" and search for the file path to identify the process holding it.
+
+**Recover**:
+
+1. Close programs that may hold the file (editor, preview, sync client), pause syncing, or add the data directory to the antivirus / indexer exclusions; Controlled Folder Access needs an explicit allowance.
+2. Clear the read-only attribute and restore write permission: on Windows, `attrib -R <path>` and `icacls <path> /grant <user>:(OI)(CI)M`; on POSIX, `chmod u+w` or fix the ACL. Do not run `sudo novel-cli` against a user directory: new files would end up owned by root.
+3. If a database under `raw_data` is read-only and has a `-wal` beside it, restore write permission before starting the app; SQLite needs to write the WAL to checkpoint it. Then run `novel-cli storage verify` to confirm no committed data was missed while it was read-only.
+4. After permissions are fixed, rerun the original command. Completed downloads/exports are skipped or replaced; nothing is charged twice.
+
+**About "half files"** (as currently implemented):
+
+- Config import/export, desktop settings import, TXT/HTML export, and `storage backup` / `restore` all use "same-directory temporary file → `fsync` → `os.replace`". On error the temporary file is removed (a hard kill can leave a `.tmp`, but it does not affect the old file), and **the target keeps its previous version**; no truncated output is left behind.
+- Chapter database writes use a SQLite transaction (`BEGIN IMMEDIATE`, `ROLLBACK` on failure), so a failed batch leaves no half-written rows. `-wal` / `-shm` sidecars may legitimately exist; do not delete ones that are in use.
+- Music and update downloads rename `.part` to the final name only after a complete size check. A `.part` left by a failure is a resume point, not a usable finished file.
+- The exception is the rename itself: on Windows, `os.replace` fails when the target is read-only. `storage backup` / `restore` retry a brief sharing violation caused by an antivirus scanner or indexer (`WinError 5` / `32` / `33`) for about 5 seconds; other writes fail immediately, and the old file is still intact. `config init --force` detects a read-only target before writing and refuses.
+
+### 22.3 `MAX_PATH` and Chinese Paths {#long-path}
+
+**Symptoms**: Windows reports `[WinError 206] The filename or extension is too long`, or POSIX reports `ENAMETOOLONG`; an export or music save fails, but the same book succeeds in a different directory.
+
+**Cause**: Windows limits the full path to 260 UTF-16 units (`MAX_PATH`) by default unless long-path support is enabled; POSIX limits a single path component to 255 **bytes**. Chinese text usually takes 3 bytes per character in UTF-8, so the same Chinese name hits the component limit sooner on Linux/macOS; the Windows 260 limit counts UTF-16 units instead.
+
+**What the current implementation already shortens**:
+
+- TXT export keeps "parent directory + file name" within 240 characters (leaving room for the atomic writer's `.<name>.XXXXXXXX.tmp`) and limits one file name to 200 UTF-8 bytes; HTML export also shortens names against a 240-character budget and gives chapter names a tighter limit (72 characters, shrinking further as the output directory gets deeper).
+- Music downloads limit a single file name by UTF-8 bytes (the stem to 240 bytes, the complete name to 255 bytes), but do not shorten parent directories; a very deep output root can still exceed the Windows 260 limit.
+- `sanitize_filename` replaces invalid Windows characters and truncates to the platform limit.
+
+Ordinary long titles therefore usually succeed. If it still fails, the **root directory is usually too deep**, or a path other than the export name (media, cover) is too long.
+
+**Fix**:
+
+1. Move the data directories to a short root (for example `C:\nd` or `D:\books`), or move the application home with `NOVEL_HOME`. This is more reliable than renaming books one by one.
+2. Windows 10 1607+ can enable long paths (registry `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled=1`, then reboot), but do not rely on it: third-party tools, archive extraction, and some APIs may still assume 260. Short paths remain the safest option.
+3. Chinese paths do not need to become ASCII: Python and this project handle Unicode. If this is only a garbled terminal display, follow [§4 Paths Containing Chinese Characters or Spaces](#path-chinese-spaces) to switch to the UTF-8 code page or point the data directory at a pure-ASCII path. If writes really fail, shorten the directory depth and file-name prefix first.
+4. A sync folder (OneDrive and similar) adds path length and may lock files; long paths plus a synced directory is the combination most likely to trigger both `ENAMETOOLONG` and `EACCES`.
+
+### 22.4 Working with `storage verify` and `doctor` {#disk-doctor-storage}
+
+After resolving a disk-full or permission problem, confirm the data is intact in this order:
+
+```bash
+# 1. Environment and free space: the disk_space and storage checks
+novel-cli doctor --json | jq '.checks[] | select(.key == "disk_space" or .key == "storage")'
+
+# 2. Read-only check of every live chapter database
+novel-cli storage verify
+
+# 3. Machine-readable output (exactly one line on stdout)
+novel-cli storage verify --json
+```
+
+- The `storage` row in `doctor` is a **sample**: it checks at most 3 databases (all of them when each is ≤ 1 MiB), opens them read-only, creates no `-wal` / `-shm`, and never reads chapter bodies. It reports `writable`, `corrupt`, `wal_read_only`, and `free_bytes`. Use `storage verify` to cover every database.
+- `storage verify` is a full read-only scan. It exits non-zero when it finds damage, and `--json` still writes a single line (with `"interrupted": true` when stopped). It does not repair anything.
+- Once damage is confirmed, follow [Storage and Backup § Restore one database from a backup](./storage.en.md#restore-one): run `storage backup` to another volume while the source is still readable, then `storage restore --from ... --force`. `restore` validates every backup first, replaces atomically, and rolls the whole set back on failure; the replaced database is kept as `.pre-restore-*.bak` in the same directory.
+- For the full semantics of `--keep` and the default post-write verification, see [Storage and Backup § Backup](./storage.en.md#storage-backup); for capacity estimates and the `doctor` fields, see [Performance and Capacity § Disk and backup](./performance.en.md#disk-backup) and [§ doctor](./performance.en.md#doctor).
+
+---
+
+## 23. Still Stuck?
 
 Include the following information when opening an issue:
 

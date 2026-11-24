@@ -445,7 +445,7 @@ JSON **语法**错误属于 `422`（`errors[].type` 为 `json_invalid`，`detail
 
 ---
 
-## 4. 路径包含中文或空格
+## 4. 路径包含中文或空格 {#path-chinese-spaces}
 
 **现象**：导出失败、资源文件找不到、第三方工具报编码错误，或 Android 下载链接异常。
 
@@ -1196,7 +1196,142 @@ CLI 的完整选项与示例见 [CLI 用法 § search 子命令](./cli-examples.
 
 ---
 
-## 22. 仍有问题？
+## 22. 磁盘满 / 权限不足 / 文件被占用 {#disk-permission-locks}
+
+这三类问题都发生在**写盘**这一步：`ENOSPC` 是卷或配额已满，`EACCES` / `EPERM` 是没有写权限，Windows 上还常见文件被其它进程或杀毒软件短暂占用。先确认是哪一种，再按下面的顺序处理。备份、校验与容量规划的完整说明见[存储与备份](./storage.md)和[性能与容量](./performance.md#disk-backup)，本节只讲排障与恢复。
+
+### 22.1 `ENOSPC`：空间或配额不足 {#enospc}
+
+**现象**：命令或任务以 `OSError: [Errno 28] No space left on device`、Windows `[WinError 112] 磁盘空间不足`、或 macOS 的配额错误结束。不同入口的表现：
+
+| 入口 | 表现 | 已经写入的内容 |
+| --- | --- | --- |
+| `storage backup` | 写快照临时文件时失败；`--json` 输出一行 `ok:false`，`error` 为稳定分类（磁盘满常见 `io_error` 或 `database_error`），退出码 `1` | 本次运行写出的整组副本被回滚删除；源库与旧备份不动 |
+| `storage restore` | 写快照或 `.pre-restore-*.bak` 时失败；退出码 `1` | 已安装的目标回滚，原库（或 `.pre-restore` 副本）保留 |
+| 音乐下载 | 逐曲结果标为失败（`retryable: true`），批量任务继续处理其余曲目 | 保留 `<目标>.part`，下次运行按 `Range` 续传；不会被当成已完成 |
+| `config import` / 桌面设置导入 | 报 `Could not write ...` / 「无法导出设置」，退出码 `1` | 临时文件删除，原 `settings.toml` / `desktop_prefs.json` 保持不变 |
+| 桌面自动更新 | 新传输开始前就比较声明的总大小与剩余空间，不够时直接拒绝；传输中满盘会重试 | 保留可续传的 `.part`；更新目录中 `.part` 超过 1 天、完整安装包超过 7 天会被清理 |
+| TXT / HTML 导出 | 原子写入失败并报错 | 临时文件删除，上一次导出的成品保持原样 |
+
+**确认**：
+
+```bash
+novel-cli doctor --json | jq '.checks[] | select(.key == "disk_space")'
+novel-cli storage --json        # 四个数据目录各自的 free_bytes 与 top
+```
+
+`doctor` 的 `disk_space` 检查**输出目录所在卷**，低于 512 MiB 时给出警告；它是建议项（`fatal: false`），只提示，不影响退出码。`storage` 的 `free_bytes` 按目录分别统计，空间不足往往只发生在 `raw_data`、音乐目录或更新目录所在的那个卷。Windows 上还要看资源管理器里的磁盘配额、OneDrive 的「释放空间」状态和虚拟磁盘容量。
+
+**处理**：
+
+1. 先预览清理，再执行：
+
+   ```bash
+   novel-cli clean cache --dry-run
+   novel-cli clean book --site qidian <book_id> --all --dry-run
+   novel-cli storage --clean --dry-run
+   novel-cli doctor --fix --dry-run   # 只清理输出/缓存/日志目录下 7 天前的 .tmp/.part
+   ```
+
+   `doctor --fix` 不会碰 `raw_data`、备份目录或音乐目录；它只创建缺失的输出/缓存/日志目录，并删除这些目录里过期的临时文件。
+
+2. 把备份目录算进容量。`storage backup` 是完整快照，不是增量；每次运行至少需要与源库总大小相当的空闲空间，`--keep N` 的占用约为 `N × 单库大小`。轮转旧备份前先预览：
+
+   ```bash
+   novel-cli storage backup --out /path/to/backups --keep 7 --dry-run
+   novel-cli storage backup --out /path/to/backups --keep 7
+   ```
+
+   `--keep` 只删除 `--out` 下严格匹配 `chapter.<stage>.<UTC 时间戳>.sqlite` 的旧文件；本次运行写出的备份永远受保护。
+
+3. 换卷或换更短的根目录：把 `raw_data_dir` / `output_dir` / `cache_dir` 指到空间充足的本地盘，或用 `NOVEL_HOME` 整体迁移。不要在下载、备份或恢复运行期间移动这些目录。
+
+4. 处理 `.part`：音乐和更新下载的 `.part` 是**有意的断点**，空出空间后重跑同一命令会续传；确认没有进程在使用且不再续传时才手工删除。`storage backup` 的正常失败（含 Ctrl+C）会删除本次写出的副本；进程被强杀后，下一次备份会在同一目录清理残留的占位和临时文件。输出/缓存/日志目录里的过期临时文件可交给 `doctor --fix`。`doctor --fix` 不扫描备份目录，那里的残留需要手工删除。
+
+### 22.2 `EACCES` / `EPERM`：没有权限或文件被占用 {#permission-denied}
+
+**现象**：`PermissionError: [Errno 13] Permission denied`；Windows 常见 `[WinError 5] 拒绝访问`、`[WinError 32] 另一个程序正在使用此文件，进程无法访问`。也可能表现为「无法创建临时文件」或「无法重命名」。
+
+**常见原因**（按出现频率）：
+
+- 目录或文件只读：ACL 没有写权限、文件带只读属性、卷以只读方式挂载；
+- Windows 上目标文件被另一个进程打开：编辑器/阅读器预览、同步盘（OneDrive/坚果云）、杀毒软件实时扫描、搜索索引器；
+- 受控文件夹访问（Controlled Folder Access）或企业策略阻止写入；
+- 用管理员 / `sudo` 运行过一次，之后普通用户无法写同一目录；或目录属于另一个用户。
+
+**确认**：
+
+```bash
+# POSIX：看目录权限与当前用户，再实际试写一个文件
+ls -ld raw_data downloads
+id
+touch raw_data/.write-test && rm raw_data/.write-test
+
+# Windows PowerShell：看 ACL 和只读属性
+Get-Acl .\raw_data | Format-List
+attrib .\raw_data
+```
+
+`novel-cli doctor --json` 的 `storage` 检查会给出 `writable`、`wal_read_only` 和具体建议；输出/缓存/日志目录的检查会实际写一个探测文件，失败时直接报告 `EACCES`。Windows 上可用资源监视器（`resmon`）的「关联的句柄」搜索文件路径，确认是哪个进程持有句柄。
+
+**恢复**：
+
+1. 关闭可能占用文件的程序（编辑器、预览、同步客户端），暂停同步，或把数据目录加入杀软 / 索引器排除项；受控文件夹访问需要显式允许。
+2. 去掉只读属性并恢复写权限：Windows 用 `attrib -R <path>`、`icacls <path> /grant <user>:(OI)(CI)M`；POSIX 用 `chmod u+w` 或修正 ACL。不要用 `sudo novel-cli` 写用户目录，那会把新文件变成 root 所有。
+3. `raw_data` 里的数据库只读且旁边有 `-wal` 时，先恢复该库的写权限再启动；SQLite 需要写 WAL 才能 checkpoint。之后运行 `novel-cli storage verify`，确认只读期间没有漏掉已提交的数据。
+4. 权限修好后重跑原命令即可；已完成的下载/导出会跳过或覆盖，不会重复计费。
+
+**关于「半文件」**（按当前实现）：
+
+- 配置导入/导出、桌面设置导入、TXT/HTML 导出、`storage backup` / `restore` 都走「同目录临时文件 → `fsync` → `os.replace`」；出错时删除临时文件（进程被强杀时可能残留 `.tmp`，但不影响旧文件），**目标文件保持旧版本**，不会出现截断的成品。
+- 章节库写入使用 SQLite 事务（`BEGIN IMMEDIATE`，失败时 `ROLLBACK`），失败的批次不会留下半行数据；`-wal` / `-shm` 旁文件可能正常存在，不要手工删除正在使用的它们。
+- 音乐和更新下载只在完整校验后把 `.part` 改名为最终文件；失败留下的 `.part` 是续传点，不是可用的成品。
+- 例外在重命名这一步：Windows 上目标文件只读时 `os.replace` 会失败。`storage backup` / `restore` 对杀软或索引器造成的短暂共享冲突（`WinError 5` / `32` / `33`）会在约 5 秒内重试；其它写入直接报错，旧文件仍然完整。`config init --force` 会在写之前检测只读目标并拒绝。
+
+### 22.3 `MAX_PATH` 与中文路径 {#long-path}
+
+**现象**：Windows 报 `[WinError 206] 文件名或扩展名太长`，或 POSIX 报 `ENAMETOOLONG`；导出或音乐保存失败，但同一本书换个目录就成功。
+
+**原因**：Windows 默认把完整路径限制在 260 个 UTF-16 单元（`MAX_PATH`），除非系统启用长路径；POSIX 限制的是单个路径分量 255 **字节**。中文在 UTF-8 中通常占 3 字节/字，所以同一串中文名在 Linux/macOS 上更容易撞到分量上限；Windows 的 260 则按 UTF-16 单元计算。
+
+**当前实现已经做的缩短**：
+
+- TXT 导出把「父目录 + 文件名」控制在 240 字符以内（给原子写入的 `.<name>.XXXXXXXX.tmp` 留余量），并把单个文件名限制在 200 UTF-8 字节；HTML 导出同样按 240 字符预算缩短名称，章节名另有更紧的上限（72 字符，随输出目录变深继续缩小）；
+- 音乐下载按 UTF-8 字节限制单个文件名（主体最多 240 字节，完整文件名最多 255 字节），但不缩短父目录；输出根目录很深时仍可能超过 Windows 的 260；
+- `sanitize_filename` 替换 Windows 非法字符，并按平台上限截断。
+
+因此普通长书名通常不会失败；仍然报错时，多半是**根目录本身太深**，或媒体、封面等导出文件名之外的路径过长。
+
+**处理**：
+
+1. 把数据目录换到短根路径（如 `C:\nd`、`D:\books`），或用 `NOVEL_HOME` 迁移应用主目录；这比逐本书改名更可靠。
+2. Windows 10 1607+ 可启用长路径（注册表 `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled=1`，重启生效），但不要依赖它：第三方工具、压缩包解压和部分 API 仍可能按 260 处理，保持短路径最稳。
+3. 中文路径本身不需要改成 ASCII：Python 和本项目按 Unicode 处理。若只是终端显示乱码，按[§4 路径包含中文或空格](#path-chinese-spaces) 切换 UTF-8 代码页或把数据目录指到纯 ASCII 路径；若确实写入失败，优先缩短目录层级与文件名前缀。
+4. 同步盘（OneDrive 等）会额外占用路径长度并可能锁定文件；长路径加同步目录是最容易同时触发 `ENAMETOOLONG` 和 `EACCES` 的组合。
+
+### 22.4 与 `storage verify`、`doctor` 配合 {#disk-doctor-storage}
+
+磁盘满或权限问题处理完后，按这个顺序确认数据没有损坏：
+
+```bash
+# 1. 环境与余量：disk_space / storage 两类检查
+novel-cli doctor --json | jq '.checks[] | select(.key == "disk_space" or .key == "storage")'
+
+# 2. 只读校验所有在用章节库
+novel-cli storage verify
+
+# 3. 需要机器可读结果时（stdout 只有一行）
+novel-cli storage verify --json
+```
+
+- `doctor` 的 `storage` 行是**采样**：最多检查 3 个数据库（全部 ≤ 1 MiB 时全量），只读打开，不创建 `-wal` / `-shm`，也不读章节正文；它报告 `writable`、`corrupt`、`wal_read_only`、`free_bytes`。要覆盖全部库，用 `storage verify`。
+- `storage verify` 是只读的完整扫描；发现损坏时退出码非 `0`，`--json` 仍只输出一行（中断时带 `"interrupted": true`）。它不会替你修复。
+- 确认损坏后，按[存储与备份 § 从备份恢复一个数据库](./storage.md#restore-one) 操作：先 `storage backup` 到另一个卷（源库仍可读时），再 `storage restore --from ... --force`。`restore` 会先校验每个备份、原子替换，并在失败时回滚整组；覆盖前的旧库保存在同目录的 `.pre-restore-*.bak`。
+- `storage backup` 的 `--keep` 与默认写后校验的完整语义见[存储与备份 § 备份](./storage.md#storage-backup)；容量估算与 `doctor` 字段见[性能与容量 § 磁盘与备份](./performance.md#disk-backup) 和 [§ doctor](./performance.md#doctor)。
+
+---
+
+## 23. 仍有问题？
 
 带上下面的信息提交 Issue：
 
