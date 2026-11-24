@@ -114,3 +114,50 @@ def test_cz_search():
     cls=registrar.get_searcher_class("sk_czbooks")
     rows=cls(None)._parse_html('<ul class="novel-list"><li class="novel-item-wrapper"><div class="novel-item-cover-wrapper"><a href="/n/abc"></a></div><div class="novel-item-title">合成小說</div><div class="novel-item-author"><a>作者</a></div></li></ul>')
     assert rows[0]["book_id"]=="abc" and rows[0]["title"]=="合成小說"
+
+@pytest.mark.parametrize("site,url,pages,expected",[
+    ("sk_biquge5","https://www.biquge5.com/123/",{
+        "https://www.biquge5.com/123/":'<meta property="og:novel:book_name" content="合成"><meta property="og:novel:author" content="作者"><div class="book_list2"><a href="/123/101.html">第一章</a></div><a href="/123/index_2.html">下一页</a>',
+        "https://www.biquge5.com/123/index_2.html":'<div class="book_list2"><a href="/123/102.html">第二章</a></div>',
+        "https://www.biquge5.com/123/101.html":'<article>合成甲</article><a href="101_2.html">下一页</a>',
+        "https://www.biquge5.com/123/101_2.html":'<article>合成乙</article>',
+        "https://www.biquge5.com/123/102.html":'<article>合成丙</article>'
+    },["合成甲","合成乙","合成丙"]),
+    ("sk_czbooks","https://czbooks.net/n/demo",{
+        "https://czbooks.net/n/demo":'<div class="info"><h1 class="title">合成</h1><span class="author"><a>作者</a></span></div><ul id="chapter-list"><li><a href="/n/demo/a">第一章</a></li><li><a href="/n/demo/b">第二章</a></li></ul>',
+        "https://czbooks.net/n/demo/a":'<div class="content">合成甲</div>',
+        "https://czbooks.net/n/demo/b":'<div class="content">合成乙</div>'
+    },["合成甲","合成乙"]),
+    ("sk_shuku52","https://www.52shuku.net/gl/demo.html",{
+        "https://www.52shuku.net/gl/demo.html":'<h1 class="article-title">合成_作者</h1><li class="mulu"><a href="/gl/demo_2.html">第1页</a></li><li class="mulu"><a href="/gl/demo_3.html">第2页</a></li>',
+        "https://www.52shuku.net/gl/demo_2.html":'<article class="article-content"><p>合成简介</p><p>第1章</p><p>合成甲</p></article>',
+        "https://www.52shuku.net/gl/demo_3.html":'<article class="article-content"><p>合成乙</p></article>'
+    },["合成简介","合成甲","合成乙"])
+])
+def test_full_pipeline(bundle,tmp_path,monkeypatch,site,url,pages,expected):
+    from sourcekit.webcli import download
+    from novel_downloader.plugins.rule.fetcher import RuleFetcher
+    calls=[]
+    async def get(self,url,*args,**kwargs):
+        calls.append(url)
+        return pages[url]
+    monkeypatch.setattr(RuleFetcher,"_get",get)
+    out=tmp_path/"out"
+    assert asyncio.run(download(url,out,tmp_path/"cache"))==0
+    paths=list(out.glob("*.txt"))
+    assert len(paths)==1
+    text=paths[0].read_text()
+    assert all(text.count(x)==1 for x in expected)
+    assert [text.index(x) for x in expected]==sorted(text.index(x) for x in expected)
+    assert set(calls)==set(pages)
+
+def test_pagination_error_is_not_completion(bundle,monkeypatch):
+    from novel_downloader.schemas import FetcherConfig
+    from novel_downloader.plugins.rule.fetcher import RuleFetcher
+    async def get(self,url,*args,**kwargs):
+        if url.endswith("101.html"):return '<article>甲</article><a href="101_2.html">下一页</a>'
+        raise RuntimeError("fixture page failed")
+    monkeypatch.setattr(RuleFetcher,"_get",get)
+    f=registrar.get_fetcher("sk_biquge5",FetcherConfig())
+    with pytest.raises(RuntimeError,match="fixture page failed"):
+        asyncio.run(f.fetch_chapter_content("123","101"))

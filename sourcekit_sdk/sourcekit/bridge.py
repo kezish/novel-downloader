@@ -137,4 +137,8 @@ def register_sources(build):
         if x["backend"]=="plugin":
             if any(registrar.get_registered(x["id"],k) is not None for k in ("fetcher","parser","searcher","client")):raise RuntimeError("registration collision "+x["id"])
             registrar.register_site(x["id"],**plugin_classes(x))
+    for x in m["sources"]:
+        if x["backend"]!="direct":
+            cls=registrar.get_registered(x["id"],"fetcher")
+            if cls is not None:cls.STRICT_PAGINATION=True
     return m

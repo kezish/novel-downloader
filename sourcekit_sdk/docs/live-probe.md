@@ -13,3 +13,13 @@ upstream CZBooks request contract (URL path plus q parameter) and explicitly
 reports challenge responses. With the native async search pipeline, 三體 and
 斗破蒼穹 each returned 15 usable results in a bounded live test. This does not
 prove continued availability or download access. No challenge bypass was used.
+
+## Download-chain validation
+Live public-domain title search: CZBooks 三國演義 returned 15 results, the
+sample detail parsed 119 directory links and first chapter parsed successfully.
+Biquge5 三国演义 returned 6 results, the sample first directory page parsed
+100 links and first chapter parsed successfully. Only bounded page probes;
+no complete live book was downloaded.
+Full synthetic books for Biquge5 (including directory and chapter pagination),
+CZBooks and 52 passed through the real client, SQLite and TXT exporter.
+Strict pagination rejects failed follow-up requests and repeated bodies.

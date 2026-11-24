@@ -64,6 +64,7 @@ class RuleFetcher(BaseFetcher):
     _rule: ClassVar[Rule]
     site_name: str = "rule"
     DEFAULT_BASE_URL: str = ""
+    STRICT_PAGINATION: ClassVar[bool] = False
 
     def _base(self) -> str:
         return (self._rule.base_url or self._base_url).rstrip("/")
@@ -236,6 +237,8 @@ class RuleFetcher(BaseFetcher):
                 # page would return silently truncated content.
                 raise
             except Exception as e:
+                if self.STRICT_PAGINATION:
+                    raise
                 logger.warning(
                     "Failed extra page (site=%s, url=%s): %s",
                     self.site_name,
@@ -243,9 +246,18 @@ class RuleFetcher(BaseFetcher):
                     e,
                 )
                 break
+            if self.STRICT_PAGINATION and body_fingerprint(current) in seen_bodies:
+                raise RuleError("Repeated pagination response")
             extra.append(current)
             if should_stop_pagination(pages_rule, current, next_url, seen, seen_bodies):
                 break
             seen.add(next_url)
             page += 1
+        if self.STRICT_PAGINATION and len(extra) >= MAX_EXTRA_PAGES:
+            candidate = render(pages_rule.url, base_url=base, page=page, **fmt)
+            if not matches_stop_when(pages_rule,current) and (
+                (last is not None and page <= last) or
+                (last is None and (candidate.rsplit("/",1)[-1] in current))
+            ):
+                raise RuleError("Pagination limit reached before completion")
         return extra
