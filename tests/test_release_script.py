@@ -2689,26 +2689,27 @@ class TestTagTarget:
         assert sub.calls == []
         assert http.requests == []
 
-    def test_allow_tag_content_equal_requires_skip_build(
+    def test_allow_tag_content_equal_works_for_a_real_build_too(
         self,
         release: Any,
         harness: tuple[Path, FakeSubprocess, FakeHTTP],
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        """The flag relaxes *which commit* the tag points at, not the build mode.
+
+        A tree comparison proves the source is identical, so a real build may
+        use it too; only ``--allow-tag-behind`` is tied to ``--skip-build``.
+        """
         root, sub, http = harness
 
         rc = release.main(
-            [
-                "--allow-tag-content-equal",
-                "--skip-android",
-                "--skip-installer",
-                "--repo",
-                SLUG,
-            ]
+            ["--allow-tag-content-equal", "--dry-run", "--repo", SLUG]
         )
 
-        assert rc == 2
-        assert "requires --skip-build" in capsys.readouterr().err
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "content-equal" in out
+        assert "requires --skip-build" not in out
         assert sub.calls == []
         assert http.requests == []
 

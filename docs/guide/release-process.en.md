@@ -320,8 +320,7 @@ Rules:
 | the tag is an ancestor of HEAD | allowed, prints a notice, **the tag is not moved** |
 | the tag diverged from HEAD (not an ancestor) | refused; `--allow-tag-behind` cannot help, handle the tag by hand |
 | the tag points at another commit | refused; never silently reused |
-| the remote tag exists at a different commit | refused; if both commits have an **identical tree** (a content-equal replay with a different SHA), `--skip-build --allow-tag-content-equal` is accepted |
-| `--allow-tag-content-equal` without `--skip-build` | the combination is rejected |
+| the remote tag exists at a different commit | refused; if both commits have an **identical tree** (a content-equal replay with a different SHA), `--allow-tag-content-equal` is accepted, for a real build or a `--skip-build` resume |
 
 `--allow-tag-content-equal` reads the remote tag commit's tree through the API and
 compares it with the tree of the commit the local tag points at (HEAD may have

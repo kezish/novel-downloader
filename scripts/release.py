@@ -70,8 +70,10 @@ provided the tag is an ancestor of ``HEAD``.  A real build always requires
 the tag to point at ``HEAD``; no run ever moves or deletes a tag.
 ``--allow-tag-content-equal`` is the sibling escape hatch for a different
 commit SHA with an **identical tree** (what an API-replayed push produces).
-It compares the remote commit's tree with ``HEAD^{tree}`` through the API and
-refuses when they differ; it too is only accepted with ``--skip-build``.
+It compares the remote tag commit's tree with the local tag commit's tree
+through the API and refuses when they differ.  It works for a real build and
+for ``--skip-build``: the tree comparison proves the source is the same, and
+the tag is never moved.
 
 Exit codes: 0 success; 2 for a ``ReleaseError`` (bad input, failed build,
 API error) and for argparse usage errors.
@@ -2264,7 +2266,7 @@ def _dry_run(
     if args.allow_tag_content_equal:
         print(
             "Tag replay  : content-equal remote tag allowed "
-            "(--allow-tag-content-equal with --skip-build; trees compared, "
+            "(--allow-tag-content-equal; trees compared, "
             "tag never moved)"
         )
     print(f"Repository  : {args.repo or '(from git remote origin)'}")
@@ -2412,11 +2414,9 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
             "--allow-tag-behind requires --skip-build: a real build must be "
             "released from HEAD, so only a resumed build may sit behind the tag"
         )
-    if args.allow_tag_content_equal and not args.skip_build:
-        raise ReleaseError(
-            "--allow-tag-content-equal requires --skip-build: only a resumed "
-            "build may be published under a content-equal remote tag"
-        )
+    # ``--allow-tag-content-equal`` is safe for a real build too: the flag only
+    # relaxes *which commit* the remote tag points at, and the tree comparison
+    # proves the source is identical to the commit this build came from.
     # Notes first: a missing or empty CHANGELOG section is the most actionable
     # error, and it also covers the "released a version that was never
     # documented" case before the version-consistency gate fires.  This also
@@ -2633,7 +2633,7 @@ def _run_release(args: argparse.Namespace, repo_root: Path) -> int:
     head_sha = head_commit(repo_root)
     remote_sha = remote_tag_commit(repo_root, tag)
     client = GitHubClient(slug, token, api_base=args.api_base)
-    content_equal_ok = bool(args.allow_tag_content_equal and args.skip_build)
+    content_equal_ok = bool(args.allow_tag_content_equal)
     behind_ok = bool(args.allow_tag_behind and args.skip_build)
     if remote_sha is None and (content_equal_ok or behind_ok):
         # ``git ls-remote`` needs github.com:443, which is exactly what is
@@ -2787,9 +2787,10 @@ def main(argv: list[str] | None = None) -> int:
         "--allow-tag-content-equal",
         action="store_true",
         help=(
-            "with --skip-build only: allow a remote tag that points at a "
-            "different commit with an identical tree (an API-replayed push); "
-            "refuses when the trees differ, and never moves the tag"
+            "allow a remote tag that points at a different commit with an "
+            "identical tree (an API-replayed push); the trees are compared "
+            "through the API, it refuses when they differ, and it never moves "
+            "the tag. Works for a real build and for --skip-build"
         ),
     )
     parser.add_argument(
