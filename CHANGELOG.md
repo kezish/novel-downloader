@@ -1,3 +1,30 @@
+## v1.40.0 (2026-11-24)
+
+Android 引擎容错、follow JSON 与配置/规则健壮性。
+
+### Feature
+
+- **CLI `follow check --json`**：单行对象（`ok/checked/changed/failed/invalid/books`），`--wait` 与 `--json` 互斥；越界/无效追更条目不再被搜索或写回
+- **Android 引擎**：启动状态机（STARTING/READY/FAILED/STOPPED + generation）、8081–8084 端口回退、15s 健康探测与一次重试、启动后存活复检、停止/重启 token 轮换与客户端同步、设置页实时状态
+- **桌面更新**：自动下载幂等（并发/重复事件只下载一次）、已下载文件复用前复验、下载中点击跟随进度、跳过版本阻止退出安装、退出钩子不阻塞
+
+### Fix
+
+- **配置**：超大整数与非法路径不再抛 `OverflowError`/`ValueError` 裸异常，统一为带路径的配置问题
+- **规则 JSON**：链式下标 `a[0][1]` 正确解析；深层嵌套与循环引用转 `RuleError`
+- **密钥扫描**：配置值、前缀键、UTF-16 BOM 等（v1.39.0 延续）
+
+### Docs
+
+- 新增中英「性能与容量」指南（下载/搜索/音乐/SQLite/API 参数、容量估算、瓶颈判断）
+- 发布流程：内容一致的远端 tag 现在真实构建也可用（一次发布完成）
+
+### Test
+
+- Python **15537 passed / 63 skipped**；ruff/format、mypy 全绿
+- Android 全量单测 803 用例、`lintDebug` 通过
+- 新增 60 例配置 fuzz、105 例 JSON 选择器、follow/窗口/引擎/更新状态机矩阵
+
 ## v1.39.0 (2026-11-22)
 
 桌面窗口重置、OpenAPI 文档质量与扫描/下载分类强化。
