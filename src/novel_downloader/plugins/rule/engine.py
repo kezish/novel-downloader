@@ -121,8 +121,12 @@ _TAG_OPEN_RE = re.compile(r"<")
 # a ``{name}`` placeholder used by :func:`render` (single pass)
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 
-#: A single dot-path segment: ``key``, ``key[2]``, ``key[*]`` or ``[0]``
-_SEGMENT_RE = re.compile(r"^([^\[\]]*)(?:\[([^\]]*)\])?$")
+#: A single dot-path segment: ``key``, ``key[2]``, ``key[*]`` or ``[0]``.
+#: The index part is a *run* of brackets so ``a[0][1]`` is one segment.
+_SEGMENT_RE = re.compile(r"^([^\[\]]*)((?:\[[^\]]*\])*)$")
+
+#: One ``[...]`` suffix inside a segment (used to split ``a[0][1]``).
+_INDEX_SUFFIX_RE = re.compile(r"\[([^\]]*)\]")
 
 #: Longest selector echoed back in an error message.  A rule file is bounded,
 #: but a programmatic 1 MiB selector must not turn one typo into a 1 MiB log
@@ -181,6 +185,11 @@ def parse_json(raw: str) -> Any:
         raise RuleError("empty response cannot be parsed as JSON")
     try:
         return json.loads(text)
+    except RecursionError as e:
+        # A response nesting arrays/objects deeper than the decoder's recursion
+        # budget raises a bare ``RecursionError``; report it as an unusable
+        # body instead of leaking a non-``RuleError`` into the fetch pipeline.
+        raise RuleError("JSON response is nested too deeply to decode") from e
     except ValueError as e:
         raise RuleError(f"unparseable JSON response: {e}") from e
 
@@ -233,7 +242,13 @@ def select(root: Any, selector: str, fmt: str = "html") -> list[Any]:
 
 
 def _path_segments(path: str) -> list[tuple[str, str | None]]:
-    """Split ``$.a.b[*].c`` into ``[(key, index-or-None), ...]``."""
+    """
+    Split ``$.a.b[*].c`` into ``[(key, index-or-None), ...]``.
+
+    A segment may carry several indexes (``a[0][1]``); each one becomes its own
+    ``("", index)`` step after the keyed one, which is exactly how
+    :func:`_walk` applies chained lookups.
+    """
     body = path.strip()
     if body.startswith("$"):
         body = body[1:]
@@ -245,8 +260,14 @@ def _path_segments(path: str) -> list[tuple[str, str | None]]:
         match = _SEGMENT_RE.match(piece)
         if match is None:  # pragma: no cover - regex is total over dot-pieces
             segments.append((piece, None))
-        else:
-            segments.append((match.group(1), match.group(2)))
+            continue
+        key = match.group(1)
+        indexes = _INDEX_SUFFIX_RE.findall(match.group(2))
+        if not indexes:
+            segments.append((key, None))
+            continue
+        segments.append((key, indexes[0]))
+        segments.extend(("", index) for index in indexes[1:])
     return segments
 
 
@@ -334,6 +355,19 @@ def node_to_str(node: Any, attr: str) -> str:
     return (node.get(attr) or "").strip()
 
 
+def _json_dumps(value: Any) -> str:
+    """Serialize a decoded value for a ``text``/``html`` ``attr``, safely."""
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except RecursionError as e:
+        # ``json.loads`` accepts documents deeper than ``json.dumps`` can
+        # serialize; an ``attr`` that dumps the whole object would otherwise
+        # crash the parse with a bare ``RecursionError``.
+        raise RuleError("JSON value is nested too deeply to serialize") from e
+    except ValueError as e:  # e.g. a circular structure from a programmatic root
+        raise RuleError(f"JSON value cannot be serialized: {e}") from e
+
+
 def json_to_str(value: Any, attr: str) -> str:
     """
     Convert a decoded JSON value into a string according to ``attr``.
@@ -352,7 +386,7 @@ def json_to_str(value: Any, attr: str) -> str:
         return value.strip()
     if isinstance(value, dict):
         if attr in ("text", "inner_text", "html"):
-            return json.dumps(value, ensure_ascii=False)
+            return _json_dumps(value)
         found = value.get(attr)
         return json_to_str(found, "text")
     if isinstance(value, (list, tuple)):
@@ -360,7 +394,7 @@ def json_to_str(value: Any, attr: str) -> str:
             return "".join(json_to_str(item, "text") for item in value)
         if attr == "inner_text":
             return "\n".join(json_to_str(item, "text") for item in value)
-        return json.dumps(value, ensure_ascii=False)
+        return _json_dumps(value)
     return str(value)  # pragma: no cover - defensive
 
 

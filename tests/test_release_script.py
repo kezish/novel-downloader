@@ -2702,9 +2702,7 @@ class TestTagTarget:
         """
         root, sub, http = harness
 
-        rc = release.main(
-            ["--allow-tag-content-equal", "--dry-run", "--repo", SLUG]
-        )
+        rc = release.main(["--allow-tag-content-equal", "--dry-run", "--repo", SLUG])
 
         assert rc == 0
         out = capsys.readouterr().out
